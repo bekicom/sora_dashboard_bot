@@ -17,65 +17,61 @@ const SABOY_NAMES = [
   "samovyvoz",
 ];
 
-// Mongo expression: waiter_name normalized
+// Normalize waiter_name (lower + trim)
 const WAITER_NAME_NORM_EXPR = {
-  $toLower: {
-    $trim: {
-      input: { $ifNull: ["$waiter_name", ""] },
-    },
-  },
+  $toLower: { $trim: { input: { $ifNull: ["$waiter_name", ""] } } },
 };
 
-const IS_SABOY_EXPR = {
-  $in: [WAITER_NAME_NORM_EXPR, SABOY_NAMES],
-};
+const IS_SABOY_EXPR = { $in: [WAITER_NAME_NORM_EXPR, SABOY_NAMES] };
 
-// waiter_percentage can be 0/7/10/...
-// default: 10 if null/undefined
-const WAITER_PERCENT_EXPR = {
-  $ifNull: ["$waiter_percentage", 10],
-};
+// waiter_percentage can be 0/7/10/... (default: 10 if null/undefined)
+const WAITER_PERCENT_EXPR = { $ifNull: ["$waiter_percentage", 10] };
 
-// Effective percent: Saboy => 0 else waiter_percentage (default 10)
+// Saboy => 0%, else given percent
 const WAITER_PERCENT_EFFECTIVE_EXPR = {
   $cond: [IS_SABOY_EXPR, 0, WAITER_PERCENT_EXPR],
 };
 
-// Base salary per order:
-// - if service_amount > 0 => service_amount
-// - else => final_total * percent/100
-const BASE_SALARY_EXPR = {
+// ✅ Salary base: total_price (preferred)
+// fallback: max(final_total - service_amount, 0)
+const SALARY_BASE_EXPR = {
   $cond: [
-    { $gt: [{ $ifNull: ["$service_amount", 0] }, 0] },
-    { $ifNull: ["$service_amount", 0] },
+    { $gt: [{ $ifNull: ["$total_price", 0] }, 0] },
+    { $ifNull: ["$total_price", 0] },
     {
-      $multiply: [
-        { $ifNull: ["$final_total", 0] },
-        { $divide: [WAITER_PERCENT_EFFECTIVE_EXPR, 100] },
+      $max: [
+        {
+          $subtract: [
+            { $ifNull: ["$final_total", 0] },
+            { $ifNull: ["$service_amount", 0] },
+          ],
+        },
+        0,
       ],
     },
   ],
 };
 
-// Bonus salary per order (7%):
-// - if Saboy => 0
-// - if waiter_percentage <= 0 => 0
-// - else => final_total * 0.07
-const BONUS_SALARY_EXPR = {
-  $cond: [
-    {
-      $or: [IS_SABOY_EXPR, { $lte: [WAITER_PERCENT_EFFECTIVE_EXPR, 0] }],
-    },
-    0,
-    {
-      $multiply: [{ $ifNull: ["$final_total", 0] }, 0.07],
-    },
+// ✅ Base salary per order: salaryBase * waiterPercentEffective / 100
+const BASE_SALARY_EXPR = {
+  $multiply: [
+    SALARY_BASE_EXPR,
+    { $divide: [WAITER_PERCENT_EFFECTIVE_EXPR, 100] },
   ],
 };
 
-// Unified payments (supports mixedPaymentDetails array OR object OR simple paymentMethod)
-// Your earlier schema shows mixedPaymentDetails is null mostly.
-// We'll handle both.
+// ✅ Bonus salary per order: salaryBase * 7%
+// Saboy => 0
+const BONUS_SALARY_EXPR = {
+  $cond: [IS_SABOY_EXPR, 0, { $multiply: [SALARY_BASE_EXPR, 0.07] }],
+};
+
+// ✅ Total salary per order
+const TOTAL_SALARY_EXPR = { $add: [BASE_SALARY_EXPR, BONUS_SALARY_EXPR] };
+
+// =====================
+// Payments normalize
+// =====================
 const PAYMENTS_UNIFIED_EXPR = {
   $cond: [
     {
@@ -84,9 +80,7 @@ const PAYMENTS_UNIFIED_EXPR = {
         { $gt: [{ $size: "$mixedPaymentDetails" }, 0] },
       ],
     },
-    // array variant: [{cashAmount, cardAmount}] ??? (your old code assumed array of objects)
     "$mixedPaymentDetails",
-    // else if object variant: {cashAmount, cardAmount}
     {
       $cond: [
         {
@@ -109,7 +103,6 @@ const PAYMENTS_UNIFIED_EXPR = {
             amount: { $ifNull: ["$mixedPaymentDetails.clickAmount", 0] },
           },
         ],
-        // fallback: paymentMethod + paymentAmount/final_total
         [
           {
             method: { $toLower: { $ifNull: ["$paymentMethod", "unknown"] } },
@@ -164,12 +157,12 @@ exports.getSummary = async (req, res) => {
           waiterNameNorm: WAITER_NAME_NORM_EXPR,
           paymentsUnified: PAYMENTS_UNIFIED_EXPR,
 
+          salaryBase: SALARY_BASE_EXPR,
           waiterPercentEffective: WAITER_PERCENT_EFFECTIVE_EXPR,
+
           baseSalaryCalc: BASE_SALARY_EXPR,
           bonusSalaryCalc: BONUS_SALARY_EXPR,
-          totalWaiterSalaryCalc: {
-            $add: [BASE_SALARY_EXPR, BONUS_SALARY_EXPR],
-          },
+          totalWaiterSalaryCalc: TOTAL_SALARY_EXPR,
         },
       },
 
@@ -180,9 +173,15 @@ exports.getSummary = async (req, res) => {
               $group: {
                 _id: null,
                 ordersCount: { $sum: 1 },
+
+                // tushum (hisobot uchun)
                 revenueTotal: { $sum: { $ifNull: ["$final_total", 0] } },
                 avgCheck: { $avg: { $ifNull: ["$final_total", 0] } },
 
+                // ✅ oylik bazasi yig'indisi
+                salaryBaseTotal: { $sum: "$salaryBase" },
+
+                // ✅ oyliklar
                 waitersBaseSalaryTotal: { $sum: "$baseSalaryCalc" },
                 waitersBonusSalaryTotal: { $sum: "$bonusSalaryCalc" },
                 waitersSalaryTotal: { $sum: "$totalWaiterSalaryCalc" },
@@ -195,7 +194,7 @@ exports.getSummary = async (req, res) => {
                 revenueTotal: 1,
                 avgCheck: { $ifNull: ["$avgCheck", 0] },
 
-                // ✅ totals
+                salaryBaseTotal: 1,
                 waitersBaseSalaryTotal: 1,
                 waitersBonusSalaryTotal: 1,
                 waitersSalaryTotal: 1,
@@ -225,6 +224,7 @@ exports.getSummary = async (req, res) => {
       ordersCount: 0,
       revenueTotal: 0,
       avgCheck: 0,
+      salaryBaseTotal: 0,
       waitersBaseSalaryTotal: 0,
       waitersBonusSalaryTotal: 0,
       waitersSalaryTotal: 0,
@@ -308,10 +308,14 @@ exports.getWaitersReport = async (req, res) => {
       {
         $addFields: {
           waiterNameNorm: WAITER_NAME_NORM_EXPR,
+          isSaboy: IS_SABOY_EXPR,
+
+          salaryBase: SALARY_BASE_EXPR,
           waiterPercentEffective: WAITER_PERCENT_EFFECTIVE_EXPR,
+
           baseSalaryCalc: BASE_SALARY_EXPR,
           bonusSalaryCalc: BONUS_SALARY_EXPR,
-          totalSalaryCalc: { $add: [BASE_SALARY_EXPR, BONUS_SALARY_EXPR] },
+          totalSalaryCalc: TOTAL_SALARY_EXPR,
         },
       },
 
@@ -319,15 +323,36 @@ exports.getWaitersReport = async (req, res) => {
         $group: {
           _id: { $ifNull: ["$waiter_name", "Noma'lum"] },
           ordersCount: { $sum: 1 },
+
+          // tushum: final_total yig'indisi
           revenueTotal: { $sum: { $ifNull: ["$final_total", 0] } },
 
-          // totals
+          // ✅ bazasi: total_price yig'indisi
+          salaryBaseTotal: { $sum: "$salaryBase" },
+
+          // ✅ oyliklar yig'indisi
           baseSalary: { $sum: "$baseSalaryCalc" },
           bonusSalary: { $sum: "$bonusSalaryCalc" },
           totalSalary: { $sum: "$totalSalaryCalc" },
 
-          // percent info
-          basePercent: { $first: "$waiterPercentEffective" },
+          // saboy flag (agar aralashib ketsa ham)
+          anySaboy: { $max: { $cond: ["$isSaboy", 1, 0] } },
+
+          // foizlar: bir waiterda turli foizlar bo‘lishi mumkin
+          percents: { $addToSet: "$waiterPercentEffective" },
+        },
+      },
+
+      {
+        $addFields: {
+          basePercent: {
+            $cond: [
+              { $eq: [{ $size: "$percents" }, 1] },
+              { $arrayElemAt: ["$percents", 0] },
+              // aralash bo‘lsa 0 qaytaramiz (xohlasang "mixed" qilib beraman)
+              0,
+            ],
+          },
         },
       },
 
@@ -353,14 +378,18 @@ exports.getWaitersReport = async (req, res) => {
         ordersCount: x.ordersCount || 0,
         revenueTotal: x.revenueTotal || 0,
 
-        basePercent: Number.isFinite(Number(x.basePercent))
-          ? Number(x.basePercent)
-          : 10,
+        // ✅ bot/web uchun
+        salaryBaseTotal: Number(x.salaryBaseTotal || 0),
 
+        basePercent: Number(x.basePercent ?? 0),
         baseSalary: Number(x.baseSalary || 0),
+
         bonusPercent: 7,
         bonusSalary: Number(x.bonusSalary || 0),
+
         totalSalary: Number(x.totalSalary || 0),
+
+        isSaboy: Number(x.anySaboy || 0) === 1,
       })),
       meta: {
         page,
@@ -380,7 +409,6 @@ exports.getWaitersReport = async (req, res) => {
 
 // =====================
 // GET /reports/products
-// (sizning eski kod yaxshi edi - ozgina polishing)
 // =====================
 exports.getProductsReport = async (req, res) => {
   try {
@@ -450,10 +478,7 @@ exports.getProductsReport = async (req, res) => {
 
       {
         $group: {
-          _id: {
-            name: "$items.name",
-            category_name: "$items.category_name",
-          },
+          _id: { name: "$items.name", category_name: "$items.category_name" },
           totalQty: { $sum: { $ifNull: ["$items.quantity", 0] } },
           avgPrice: { $avg: { $ifNull: ["$items.price", 0] } },
           revenueTotal: { $sum: "$itemRevenue" },
