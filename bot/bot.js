@@ -467,7 +467,6 @@ bot.on("callback_query", async (q) => {
         `👨‍🍳 Ofitsiantlar oylik:\n` +
         `   • Asosiy (10%): ${formatMoney(apiWaitersSalary)}\n` +
         `   • Bonus (7%): ${formatMoney(waiterBonus)}\n` +
-        `   • Jami (17%): ${formatMoney(totalWaitersSalary)}\n\n` +
         `💵 Naqd: ${formatMoney(d.payments.cash)}\n` +
         `💳 Karta: ${formatMoney(d.payments.card)}\n` +
         `📲 Click: ${formatMoney(d.payments.click)}`;
