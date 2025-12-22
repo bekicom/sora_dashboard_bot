@@ -120,23 +120,12 @@ function formatRange(st) {
 // =====================
 function calculateWaiterSalary(revenueTotal, waiterPercentage) {
   const revenue = Number(revenueTotal || 0);
-  const percentage = Number(waiterPercentage || 0);
-
-  // Agar waiter_percentage 0 bo'lsa, hech qanday oylik yo'q
-  if (percentage === 0) {
-    return {
-      baseSalary: 0,
-      bonus: 0,
-      totalSalary: 0,
-      basePercentage: 0,
-      bonusPercentage: 0,
-    };
-  }
+  const percentage = Number(waiterPercentage || 10); // default 10%
 
   // Asosiy oylik (percentage asosida)
   const baseSalary = (revenue * percentage) / 100;
 
-  // Qo'shimcha 7% bonus (faqat waiter_percentage > 0 bo'lsa)
+  // Qo'shimcha 7% bonus
   const bonus = (revenue * 7) / 100;
 
   // Jami oylik
@@ -511,19 +500,8 @@ bot.on("callback_query", async (q) => {
             // Har bir ofitsiant uchun oylikni hisoblash
             const salary = calculateWaiterSalary(
               w.revenueTotal,
-              w.waiter_percentage || 0
+              w.waiter_percentage || 10
             );
-
-            // Agar waiter_percentage 0 bo'lsa, oylik ko'rsatmaymiz
-            if (salary.basePercentage === 0) {
-              return (
-                `${i + 1}) ${w.waiter_name}\n` +
-                `   🧾 ${w.ordersCount} ta | 💰 ${formatMoney(
-                  w.revenueTotal
-                )}\n` +
-                `   👨‍🍳 Oylik yo'q (0%)`
-              );
-            }
 
             return (
               `${i + 1}) ${w.waiter_name}\n` +
