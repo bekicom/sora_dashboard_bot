@@ -1,10 +1,131 @@
 const { getBranchKeyFromReq, getConn } = require("../config/dbManager");
 const getOrderModel = require("../models/Order");
 
+// =====================
+// Helpers
+// =====================
 function isValidYMD(s) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
 }
 
+const SABOY_NAMES = [
+  "saboy",
+  "saboiy",
+  "delivery",
+  "dostavka",
+  "takeaway",
+  "samovyvoz",
+];
+
+// Mongo expression: waiter_name normalized
+const WAITER_NAME_NORM_EXPR = {
+  $toLower: {
+    $trim: {
+      input: { $ifNull: ["$waiter_name", ""] },
+    },
+  },
+};
+
+const IS_SABOY_EXPR = {
+  $in: [WAITER_NAME_NORM_EXPR, SABOY_NAMES],
+};
+
+// waiter_percentage can be 0/7/10/...
+// default: 10 if null/undefined
+const WAITER_PERCENT_EXPR = {
+  $ifNull: ["$waiter_percentage", 10],
+};
+
+// Effective percent: Saboy => 0 else waiter_percentage (default 10)
+const WAITER_PERCENT_EFFECTIVE_EXPR = {
+  $cond: [IS_SABOY_EXPR, 0, WAITER_PERCENT_EXPR],
+};
+
+// Base salary per order:
+// - if service_amount > 0 => service_amount
+// - else => final_total * percent/100
+const BASE_SALARY_EXPR = {
+  $cond: [
+    { $gt: [{ $ifNull: ["$service_amount", 0] }, 0] },
+    { $ifNull: ["$service_amount", 0] },
+    {
+      $multiply: [
+        { $ifNull: ["$final_total", 0] },
+        { $divide: [WAITER_PERCENT_EFFECTIVE_EXPR, 100] },
+      ],
+    },
+  ],
+};
+
+// Bonus salary per order (7%):
+// - if Saboy => 0
+// - if waiter_percentage <= 0 => 0
+// - else => final_total * 0.07
+const BONUS_SALARY_EXPR = {
+  $cond: [
+    {
+      $or: [IS_SABOY_EXPR, { $lte: [WAITER_PERCENT_EFFECTIVE_EXPR, 0] }],
+    },
+    0,
+    {
+      $multiply: [{ $ifNull: ["$final_total", 0] }, 0.07],
+    },
+  ],
+};
+
+// Unified payments (supports mixedPaymentDetails array OR object OR simple paymentMethod)
+// Your earlier schema shows mixedPaymentDetails is null mostly.
+// We'll handle both.
+const PAYMENTS_UNIFIED_EXPR = {
+  $cond: [
+    {
+      $and: [
+        { $isArray: "$mixedPaymentDetails" },
+        { $gt: [{ $size: "$mixedPaymentDetails" }, 0] },
+      ],
+    },
+    // array variant: [{cashAmount, cardAmount}] ??? (your old code assumed array of objects)
+    "$mixedPaymentDetails",
+    // else if object variant: {cashAmount, cardAmount}
+    {
+      $cond: [
+        {
+          $and: [
+            { $ne: ["$mixedPaymentDetails", null] },
+            { $eq: [{ $type: "$mixedPaymentDetails" }, "object"] },
+          ],
+        },
+        [
+          {
+            method: "cash",
+            amount: { $ifNull: ["$mixedPaymentDetails.cashAmount", 0] },
+          },
+          {
+            method: "card",
+            amount: { $ifNull: ["$mixedPaymentDetails.cardAmount", 0] },
+          },
+          {
+            method: "click",
+            amount: { $ifNull: ["$mixedPaymentDetails.clickAmount", 0] },
+          },
+        ],
+        // fallback: paymentMethod + paymentAmount/final_total
+        [
+          {
+            method: { $toLower: { $ifNull: ["$paymentMethod", "unknown"] } },
+            amount: {
+              $ifNull: ["$paymentAmount", { $ifNull: ["$final_total", 0] }],
+            },
+          },
+        ],
+      ],
+    },
+  ],
+};
+
+// =====================
+// GET /reports/summary
+// =====================
 exports.getSummary = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
@@ -38,62 +159,16 @@ exports.getSummary = async (req, res) => {
     const pipeline = [
       { $match: match },
 
-      // normalize + calc
       {
         $addFields: {
-          // mixedPaymentDetails null bo'lsa ham [] bo'ladi
-      paymentsUnified: {
-  $cond: [
-    {
-      $and: [
-        { $isArray: "$mixedPaymentDetails" },
-        { $gt: [{ $size: "$mixedPaymentDetails" }, 0] },
-      ],
-    },
-    "$mixedPaymentDetails",
-    [
-      {
-        method: { $ifNull: ["$paymentMethod", "unknown"] },
-        amount: { $ifNull: ["$paymentAmount", 0] },
-      },
-    ],
-  ],
-},
+          waiterNameNorm: WAITER_NAME_NORM_EXPR,
+          paymentsUnified: PAYMENTS_UNIFIED_EXPR,
 
-
-          // defaultPercent: waiter_percentage > 0 bo'lsa o'sha, bo'lmasa 10
-          waiterPercentEffective: {
-            $cond: [
-              { $gt: [{ $ifNull: ["$waiter_percentage", 0] }, 0] },
-              "$waiter_percentage",
-              10,
-            ],
-          },
-
-          // salary: service_amount > 0 bo'lsa service_amount
-          // aks holda final_total * percent
-          waiterSalaryCalc: {
-            $cond: [
-              { $gt: [{ $ifNull: ["$service_amount", 0] }, 0] },
-              "$service_amount",
-              {
-                $multiply: [
-                  { $ifNull: ["$final_total", 0] },
-                  {
-                    $divide: [
-                      {
-                        $cond: [
-                          { $gt: [{ $ifNull: ["$waiter_percentage", 0] }, 0] },
-                          "$waiter_percentage",
-                          10,
-                        ],
-                      },
-                      100,
-                    ],
-                  },
-                ],
-              },
-            ],
+          waiterPercentEffective: WAITER_PERCENT_EFFECTIVE_EXPR,
+          baseSalaryCalc: BASE_SALARY_EXPR,
+          bonusSalaryCalc: BONUS_SALARY_EXPR,
+          totalWaiterSalaryCalc: {
+            $add: [BASE_SALARY_EXPR, BONUS_SALARY_EXPR],
           },
         },
       },
@@ -107,7 +182,10 @@ exports.getSummary = async (req, res) => {
                 ordersCount: { $sum: 1 },
                 revenueTotal: { $sum: { $ifNull: ["$final_total", 0] } },
                 avgCheck: { $avg: { $ifNull: ["$final_total", 0] } },
-                waitersSalaryTotal: { $sum: "$waiterSalaryCalc" },
+
+                waitersBaseSalaryTotal: { $sum: "$baseSalaryCalc" },
+                waitersBonusSalaryTotal: { $sum: "$bonusSalaryCalc" },
+                waitersSalaryTotal: { $sum: "$totalWaiterSalaryCalc" },
               },
             },
             {
@@ -116,6 +194,10 @@ exports.getSummary = async (req, res) => {
                 ordersCount: 1,
                 revenueTotal: 1,
                 avgCheck: { $ifNull: ["$avgCheck", 0] },
+
+                // ✅ totals
+                waitersBaseSalaryTotal: 1,
+                waitersBonusSalaryTotal: 1,
                 waitersSalaryTotal: 1,
               },
             },
@@ -125,7 +207,9 @@ exports.getSummary = async (req, res) => {
             { $unwind: "$paymentsUnified" },
             {
               $group: {
-                _id: { $toLower: { $ifNull: ["$paymentsUnified.method", "unknown"] } },
+                _id: {
+                  $toLower: { $ifNull: ["$paymentsUnified.method", "unknown"] },
+                },
                 total: { $sum: { $ifNull: ["$paymentsUnified.amount", 0] } },
               },
             },
@@ -137,17 +221,16 @@ exports.getSummary = async (req, res) => {
 
     const agg = await Order.aggregate(pipeline);
 
-    const summary =
-      (agg && agg[0] && agg[0].summary && agg[0].summary[0]) || {
-        ordersCount: 0,
-        revenueTotal: 0,
-        avgCheck: 0,
-        waitersSalaryTotal: 0,
-      };
+    const summary = agg?.[0]?.summary?.[0] || {
+      ordersCount: 0,
+      revenueTotal: 0,
+      avgCheck: 0,
+      waitersBaseSalaryTotal: 0,
+      waitersBonusSalaryTotal: 0,
+      waitersSalaryTotal: 0,
+    };
 
-    const paymentsArr = (agg && agg[0] && agg[0].payments) || [];
-
-    // faqat kerakli 3 ta methodni ko'rsatamiz
+    const paymentsArr = agg?.[0]?.payments || [];
     const payments = { cash: 0, card: 0, click: 0 };
 
     for (const p of paymentsArr) {
@@ -157,7 +240,6 @@ exports.getSummary = async (req, res) => {
       if (method === "cash") payments.cash += total;
       else if (method === "card") payments.card += total;
       else if (method === "click") payments.click += total;
-      // boshqa methodlar bo'lsa hozircha e'tiborsiz qoldiramiz
     }
 
     return res.json({
@@ -178,6 +260,9 @@ exports.getSummary = async (req, res) => {
   }
 };
 
+// =====================
+// GET /reports/waiters
+// =====================
 exports.getWaitersReport = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
@@ -200,16 +285,15 @@ exports.getWaitersReport = async (req, res) => {
       });
     }
 
-   const page = Number.isFinite(parseInt(req.query.page, 10))
-  ? parseInt(req.query.page, 10)
-  : 1;
+    const page = Number.isFinite(parseInt(req.query.page, 10))
+      ? Math.max(parseInt(req.query.page, 10), 1)
+      : 1;
 
-const limit = Number.isFinite(parseInt(req.query.limit, 10))
-  ? Math.min(Math.max(parseInt(req.query.limit, 10), 1), 100)
-  : 10;
+    const limit = Number.isFinite(parseInt(req.query.limit, 10))
+      ? Math.min(Math.max(parseInt(req.query.limit, 10), 1), 100)
+      : 10;
 
-const skip = (page - 1) * limit;
-
+    const skip = (page - 1) * limit;
 
     const Order = getOrderModel(conn);
 
@@ -221,16 +305,13 @@ const skip = (page - 1) * limit;
     const pipeline = [
       { $match: match },
 
-      // salary calc (service_amount bo'lmasa 10%)
       {
         $addFields: {
-          waiterSalaryCalc: {
-            $cond: [
-              { $gt: [{ $ifNull: ["$service_amount", 0] }, 0] },
-              "$service_amount",
-              { $multiply: [{ $ifNull: ["$final_total", 0] }, 0.1] },
-            ],
-          },
+          waiterNameNorm: WAITER_NAME_NORM_EXPR,
+          waiterPercentEffective: WAITER_PERCENT_EFFECTIVE_EXPR,
+          baseSalaryCalc: BASE_SALARY_EXPR,
+          bonusSalaryCalc: BONUS_SALARY_EXPR,
+          totalSalaryCalc: { $add: [BASE_SALARY_EXPR, BONUS_SALARY_EXPR] },
         },
       },
 
@@ -239,7 +320,14 @@ const skip = (page - 1) * limit;
           _id: { $ifNull: ["$waiter_name", "Noma'lum"] },
           ordersCount: { $sum: 1 },
           revenueTotal: { $sum: { $ifNull: ["$final_total", 0] } },
-          salaryTotal: { $sum: "$waiterSalaryCalc" },
+
+          // totals
+          baseSalary: { $sum: "$baseSalaryCalc" },
+          bonusSalary: { $sum: "$bonusSalaryCalc" },
+          totalSalary: { $sum: "$totalSalaryCalc" },
+
+          // percent info
+          basePercent: { $first: "$waiterPercentEffective" },
         },
       },
 
@@ -264,13 +352,21 @@ const skip = (page - 1) * limit;
         waiter_name: x._id,
         ordersCount: x.ordersCount || 0,
         revenueTotal: x.revenueTotal || 0,
-        salaryTotal: x.salaryTotal || 0,
+
+        basePercent: Number.isFinite(Number(x.basePercent))
+          ? Number(x.basePercent)
+          : 10,
+
+        baseSalary: Number(x.baseSalary || 0),
+        bonusPercent: 7,
+        bonusSalary: Number(x.bonusSalary || 0),
+        totalSalary: Number(x.totalSalary || 0),
       })),
       meta: {
         page,
         limit,
         total,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / limit) || 1,
       },
     });
   } catch (err) {
@@ -282,6 +378,10 @@ const skip = (page - 1) * limit;
   }
 };
 
+// =====================
+// GET /reports/products
+// (sizning eski kod yaxshi edi - ozgina polishing)
+// =====================
 exports.getProductsReport = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
@@ -304,10 +404,13 @@ exports.getProductsReport = async (req, res) => {
       });
     }
 
-    const category = String(req.query.category || "").trim(); // ixtiyoriy: "bar", "somsa"...
+    const category = String(req.query.category || "").trim();
 
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 100);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit || "10", 10), 1),
+      100
+    );
     const skip = (page - 1) * limit;
 
     const Order = getOrderModel(conn);
@@ -321,9 +424,17 @@ exports.getProductsReport = async (req, res) => {
       { $match: match },
       { $unwind: "$items" },
 
-      // category filter (agar berilgan bo'lsa)
       ...(category
-        ? [{ $match: { "items.category_name": { $regex: `^${category}$`, $options: "i" } } }]
+        ? [
+            {
+              $match: {
+                "items.category_name": {
+                  $regex: `^${category}$`,
+                  $options: "i",
+                },
+              },
+            },
+          ]
         : []),
 
       {
@@ -343,22 +454,14 @@ exports.getProductsReport = async (req, res) => {
             name: "$items.name",
             category_name: "$items.category_name",
           },
-
           totalQty: { $sum: { $ifNull: ["$items.quantity", 0] } },
           avgPrice: { $avg: { $ifNull: ["$items.price", 0] } },
           revenueTotal: { $sum: "$itemRevenue" },
-
-          // nechta orderda uchragani:
           ordersSet: { $addToSet: "$_id" },
         },
       },
 
-      {
-        $addFields: {
-          ordersCount: { $size: "$ordersSet" },
-        },
-      },
-
+      { $addFields: { ordersCount: { $size: "$ordersSet" } } },
       { $sort: { revenueTotal: -1 } },
 
       {
@@ -388,7 +491,7 @@ exports.getProductsReport = async (req, res) => {
         page,
         limit,
         total,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / limit) || 1,
         category: category || null,
       },
     });
@@ -422,7 +525,10 @@ exports.getTopProducts = async (req, res) => {
       });
     }
 
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 50);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit || "10", 10), 1),
+      50
+    );
     const category = String(req.query.category || "").trim();
 
     const Order = getOrderModel(conn);
@@ -432,7 +538,16 @@ exports.getTopProducts = async (req, res) => {
       { $unwind: "$items" },
 
       ...(category
-        ? [{ $match: { "items.category_name": { $regex: `^${category}$`, $options: "i" } } }]
+        ? [
+            {
+              $match: {
+                "items.category_name": {
+                  $regex: `^${category}$`,
+                  $options: "i",
+                },
+              },
+            },
+          ]
         : []),
 
       {
