@@ -89,7 +89,6 @@ function setRange(chatId, from, to, mode = "range") {
   st.from = from;
   st.to = to;
   st.mode = mode;
-  // products pagination reset
   st.products.page = 1;
   chatState.set(chatId, st);
 }
@@ -116,6 +115,30 @@ function calcPercent(amount, percent) {
   const p = Number(percent || 0);
   if (!Number.isFinite(a) || !Number.isFinite(p)) return 0;
   return (a * p) / 100;
+}
+
+/**
+ * API dan keladigan waiter foizini topib beradi.
+ * Backend har xil nom bilan yuborishi mumkinligi uchun bir nechta variantni tekshiradi.
+ * Topolmasa default 10 (eski behavior), lekin agar 0 kelsa 0 bo‘lib qoladi.
+ */
+function getWaiterPercent(w) {
+  const candidates = [
+    w?.waiter_percentage,
+    w?.waiterPercent,
+    w?.waiterPercentage,
+    w?.percentage,
+    w?.percent,
+  ];
+
+  for (const v of candidates) {
+    if (v === 0) return 0;
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  // agar backend umuman yubormasa — oldingi kabi 10% bo‘lib qolmasin desang, shu yerda 0 qo‘y.
+  return 10;
 }
 
 // =====================
@@ -346,7 +369,6 @@ bot.on("callback_query", async (q) => {
       );
     }
 
-    // no-op
     if (data === "NOOP") {
       return bot.answerCallbackQuery(q.id);
     }
@@ -395,7 +417,6 @@ bot.on("callback_query", async (q) => {
     }
 
     if (data.startsWith("SET_RANGE:")) {
-      // SET_RANGE:TYPE:from:to
       const parts = data.split(":");
       const type = parts[1];
       const from = parts[2];
@@ -425,7 +446,6 @@ bot.on("callback_query", async (q) => {
 
       const d = await apiSummary(st.branch, st.from, st.to);
 
-      // revenueTotal dan 7% va 10% hisoblaymiz
       const salary7 = calcPercent(d?.revenueTotal, 7);
       const salary10 = calcPercent(d?.revenueTotal, 10);
 
@@ -450,7 +470,7 @@ bot.on("callback_query", async (q) => {
       const st = getState(chatId);
       await bot.answerCallbackQuery(q.id);
 
-      const res = await apiWaiters(st.branch, st.from, st.to, 1, 20);
+      const res = await apiWaiters(st.branch, st.from, st.to, 1, 50);
       const rows = res?.data || [];
 
       if (!rows.length) {
@@ -467,13 +487,27 @@ bot.on("callback_query", async (q) => {
         `📅 ${formatRange(st)}\n\n` +
         rows
           .map((w, i) => {
-            const rev = w.revenueTotal;
+            const rev = Number(w.revenueTotal || 0);
+
+            // har bir waiter uchun foiz (0 bo‘lsa 0 qoladi)
+            const pct = getWaiterPercent(w);
+
+            // 7% taqqoslash uchun
             const s7 = calcPercent(rev, 7);
-            const s10 = calcPercent(rev, 10);
+
+            // Asosiy oylik: backend salaryTotal yuborsa shuni ishlatamiz,
+            // aks holda revenue * pct / 100
+            const salaryFromApi = Number(w.salaryTotal);
+            const hasApiSalary = Number.isFinite(salaryFromApi);
+            const sPct = hasApiSalary ? salaryFromApi : calcPercent(rev, pct);
+
+            const waiterName = w.waiter_name || w.waiterName || w.name || "-";
+            const ordersCount = w.ordersCount ?? w.orders_count ?? 0;
+
             return (
-              `${i + 1}) ${w.waiter_name}\n` +
-              `   🧾 ${w.ordersCount} ta | 💰 ${formatMoney(rev)}\n` +
-              `   👨‍🍳 7%: ${formatMoney(s7)} | 👨‍🍳 10%: ${formatMoney(s10)}`
+              `${i + 1}) ${waiterName}\n` +
+              `   🧾 ${ordersCount} ta | 💰 ${formatMoney(rev)}\n` +
+              `   👨‍🍳 7%: ${formatMoney(s7)} | 👨‍🍳 ${pct}%: ${formatMoney(sPct)}`
             );
           })
           .join("\n");
@@ -541,9 +575,7 @@ bot.on("callback_query", async (q) => {
       const catsRes = await apiCategories(st.branch, st.from, st.to);
       const cats = catsRes?.data || [];
 
-      // Inline keyboard (chunk 2 per row)
       const rows = [];
-      // "Barchasi"
       rows.push([
         {
           text: st.products.category ? "Barchasi" : "✅ Barchasi",
@@ -674,7 +706,7 @@ bot.on("callback_query", async (q) => {
         );
     }
 
-    // PRODUCTS TOP10 (same as products endpoint but 10)
+    // PRODUCTS TOP10
     if (data === "PRODUCTS_TOP10") {
       const st = getState(chatId);
       await bot.answerCallbackQuery(q.id);
@@ -747,7 +779,6 @@ bot.on("message", async (msg) => {
 
   setDefaultState(chatId);
 
-  // 🔐 Parol bosqichi
   if (!isAuthorized(chatId)) {
     if (text === BOT_PASSWORD) {
       authState.set(chatId, { authorized: true });
@@ -765,7 +796,6 @@ bot.on("message", async (msg) => {
     return bot.sendMessage(chatId, "❌ Parol noto‘g‘ri. Qayta urinib ko‘ring:");
   }
 
-  // 1) Bitta sana: YYYY-MM-DD
   if (isValidYMD(text)) {
     setRange(chatId, text, text, "day");
     return bot.sendMessage(
@@ -775,7 +805,6 @@ bot.on("message", async (msg) => {
     );
   }
 
-  // 2) Oraliq: "YYYY-MM-DD YYYY-MM-DD"
   const parts = text.split(/\s+/).filter(Boolean);
   if (parts.length === 2 && isValidYMD(parts[0]) && isValidYMD(parts[1])) {
     const from = parts[0];
@@ -798,4 +827,3 @@ bot.on("message", async (msg) => {
 });
 
 console.log("🤖 Bot running (polling)...");
-// ff
