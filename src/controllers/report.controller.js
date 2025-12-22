@@ -8,6 +8,11 @@ function isValidYMD(s) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
 }
 
+// convert any value to number safely (string/null/undefined -> default)
+const TO_NUM = (expr, def = 0) => ({
+  $convert: { input: expr, to: "double", onError: def, onNull: def },
+});
+
 const SABOY_NAMES = [
   "saboy",
   "saboiy",
@@ -24,8 +29,14 @@ const WAITER_NAME_NORM_EXPR = {
 
 const IS_SABOY_EXPR = { $in: [WAITER_NAME_NORM_EXPR, SABOY_NAMES] };
 
+// Numeric fields (always number)
+const FINAL_TOTAL_NUM = TO_NUM("$final_total", 0);
+const TOTAL_PRICE_NUM = TO_NUM("$total_price", 0);
+const SERVICE_AMOUNT_NUM = TO_NUM("$service_amount", 0);
+const WAITER_PERCENT_NUM = TO_NUM("$waiter_percentage", 10);
+
 // waiter_percentage can be 0/7/10/... (default: 10 if null/undefined)
-const WAITER_PERCENT_EXPR = { $ifNull: ["$waiter_percentage", 10] };
+const WAITER_PERCENT_EXPR = WAITER_PERCENT_NUM;
 
 // Saboy => 0%, else given percent
 const WAITER_PERCENT_EFFECTIVE_EXPR = {
@@ -36,18 +47,10 @@ const WAITER_PERCENT_EFFECTIVE_EXPR = {
 // fallback: max(final_total - service_amount, 0)
 const SALARY_BASE_EXPR = {
   $cond: [
-    { $gt: [{ $ifNull: ["$total_price", 0] }, 0] },
-    { $ifNull: ["$total_price", 0] },
+    { $gt: [TOTAL_PRICE_NUM, 0] },
+    TOTAL_PRICE_NUM,
     {
-      $max: [
-        {
-          $subtract: [
-            { $ifNull: ["$final_total", 0] },
-            { $ifNull: ["$service_amount", 0] },
-          ],
-        },
-        0,
-      ],
+      $max: [{ $subtract: [FINAL_TOTAL_NUM, SERVICE_AMOUNT_NUM] }, 0],
     },
   ],
 };
@@ -92,23 +95,21 @@ const PAYMENTS_UNIFIED_EXPR = {
         [
           {
             method: "cash",
-            amount: { $ifNull: ["$mixedPaymentDetails.cashAmount", 0] },
+            amount: TO_NUM("$mixedPaymentDetails.cashAmount", 0),
           },
           {
             method: "card",
-            amount: { $ifNull: ["$mixedPaymentDetails.cardAmount", 0] },
+            amount: TO_NUM("$mixedPaymentDetails.cardAmount", 0),
           },
           {
             method: "click",
-            amount: { $ifNull: ["$mixedPaymentDetails.clickAmount", 0] },
+            amount: TO_NUM("$mixedPaymentDetails.clickAmount", 0),
           },
         ],
         [
           {
             method: { $toLower: { $ifNull: ["$paymentMethod", "unknown"] } },
-            amount: {
-              $ifNull: ["$paymentAmount", { $ifNull: ["$final_total", 0] }],
-            },
+            amount: TO_NUM({ $ifNull: ["$paymentAmount", "$final_total"] }, 0),
           },
         ],
       ],
@@ -174,14 +175,11 @@ exports.getSummary = async (req, res) => {
                 _id: null,
                 ordersCount: { $sum: 1 },
 
-                // tushum (hisobot uchun)
-                revenueTotal: { $sum: { $ifNull: ["$final_total", 0] } },
-                avgCheck: { $avg: { $ifNull: ["$final_total", 0] } },
+                revenueTotal: { $sum: FINAL_TOTAL_NUM },
+                avgCheck: { $avg: FINAL_TOTAL_NUM },
 
-                // ✅ oylik bazasi yig'indisi
                 salaryBaseTotal: { $sum: "$salaryBase" },
 
-                // ✅ oyliklar
                 waitersBaseSalaryTotal: { $sum: "$baseSalaryCalc" },
                 waitersBonusSalaryTotal: { $sum: "$bonusSalaryCalc" },
                 waitersSalaryTotal: { $sum: "$totalWaiterSalaryCalc" },
@@ -209,7 +207,7 @@ exports.getSummary = async (req, res) => {
                 _id: {
                   $toLower: { $ifNull: ["$paymentsUnified.method", "unknown"] },
                 },
-                total: { $sum: { $ifNull: ["$paymentsUnified.amount", 0] } },
+                total: { $sum: TO_NUM("$paymentsUnified.amount", 0) },
               },
             },
             { $project: { _id: 0, method: "$_id", total: 1 } },
@@ -324,21 +322,16 @@ exports.getWaitersReport = async (req, res) => {
           _id: { $ifNull: ["$waiter_name", "Noma'lum"] },
           ordersCount: { $sum: 1 },
 
-          // tushum: final_total yig'indisi
-          revenueTotal: { $sum: { $ifNull: ["$final_total", 0] } },
+          revenueTotal: { $sum: FINAL_TOTAL_NUM },
 
-          // ✅ bazasi: total_price yig'indisi
           salaryBaseTotal: { $sum: "$salaryBase" },
 
-          // ✅ oyliklar yig'indisi
           baseSalary: { $sum: "$baseSalaryCalc" },
           bonusSalary: { $sum: "$bonusSalaryCalc" },
           totalSalary: { $sum: "$totalSalaryCalc" },
 
-          // saboy flag (agar aralashib ketsa ham)
           anySaboy: { $max: { $cond: ["$isSaboy", 1, 0] } },
 
-          // foizlar: bir waiterda turli foizlar bo‘lishi mumkin
           percents: { $addToSet: "$waiterPercentEffective" },
         },
       },
@@ -349,7 +342,6 @@ exports.getWaitersReport = async (req, res) => {
             $cond: [
               { $eq: [{ $size: "$percents" }, 1] },
               { $arrayElemAt: ["$percents", 0] },
-              // aralash bo‘lsa 0 qaytaramiz (xohlasang "mixed" qilib beraman)
               0,
             ],
           },
@@ -378,7 +370,6 @@ exports.getWaitersReport = async (req, res) => {
         ordersCount: x.ordersCount || 0,
         revenueTotal: x.revenueTotal || 0,
 
-        // ✅ bot/web uchun
         salaryBaseTotal: Number(x.salaryBaseTotal || 0),
 
         basePercent: Number(x.basePercent ?? 0),
@@ -469,8 +460,8 @@ exports.getProductsReport = async (req, res) => {
         $addFields: {
           itemRevenue: {
             $multiply: [
-              { $ifNull: ["$items.price", 0] },
-              { $ifNull: ["$items.quantity", 0] },
+              TO_NUM("$items.price", 0),
+              TO_NUM("$items.quantity", 0),
             ],
           },
         },
@@ -479,8 +470,8 @@ exports.getProductsReport = async (req, res) => {
       {
         $group: {
           _id: { name: "$items.name", category_name: "$items.category_name" },
-          totalQty: { $sum: { $ifNull: ["$items.quantity", 0] } },
-          avgPrice: { $avg: { $ifNull: ["$items.price", 0] } },
+          totalQty: { $sum: TO_NUM("$items.quantity", 0) },
+          avgPrice: { $avg: TO_NUM("$items.price", 0) },
           revenueTotal: { $sum: "$itemRevenue" },
           ordersSet: { $addToSet: "$_id" },
         },
@@ -579,8 +570,8 @@ exports.getTopProducts = async (req, res) => {
         $addFields: {
           itemRevenue: {
             $multiply: [
-              { $ifNull: ["$items.price", 0] },
-              { $ifNull: ["$items.quantity", 0] },
+              TO_NUM("$items.price", 0),
+              TO_NUM("$items.quantity", 0),
             ],
           },
         },
@@ -589,7 +580,7 @@ exports.getTopProducts = async (req, res) => {
       {
         $group: {
           _id: { name: "$items.name", category_name: "$items.category_name" },
-          totalQty: { $sum: { $ifNull: ["$items.quantity", 0] } },
+          totalQty: { $sum: TO_NUM("$items.quantity", 0) },
           revenueTotal: { $sum: "$itemRevenue" },
         },
       },
