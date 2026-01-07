@@ -2,788 +2,304 @@ require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+/* =====================
+   CONFIG
+===================== */
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const BOT_PASSWORD = String(process.env.BOT_PASSWORD || "3322");
+const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:8090/api";
+
+const BRANCH = "PITSA";
+const BRANCH_LABEL = "PITSA";
+
+/* =====================
+   INIT
+===================== */
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 const API = axios.create({
-  baseURL: process.env.API_BASE_URL || "http://localhost:8072/api",
+  baseURL: API_BASE_URL,
   timeout: 20000,
 });
 
-// =====================
-// AUTH (PASSWORD GATE)
-// =====================
-const BOT_PASSWORD = String(process.env.BOT_PASSWORD || "3322");
-const authState = new Map(); // chatId -> { authorized: true/false }
-
-function isAuthorized(chatId) {
-  return authState.get(chatId)?.authorized === true;
-}
-
-// =====================
-// BRANCH LABELS (UI)
-// =====================
-const BRANCH_LABELS = {
-  branch1: "NAVOIY",
-  branch2: "DOSTLIK",
-  branch3: "TORQOR",
-};
-function branchLabel(branchKey) {
-  return BRANCH_LABELS[branchKey] || branchKey;
-}
-
-// =====================
-// CHAT STATE
-// =====================
-// chatId -> { branch, from, to, mode, products:{category,page,limit} }
+/* =====================
+   AUTH + STATE
+===================== */
+const authState = new Map();
 const chatState = new Map();
 
-function ymd(date) {
-  const d = new Date(date);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+/* =====================
+   DATE UTILS
+===================== */
+function ymd(d) {
+  const x = new Date(d);
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(x.getDate()).padStart(2, "0")}`;
 }
-
-function addDays(ymdStr, deltaDays) {
-  const [Y, M, D] = ymdStr.split("-").map(Number);
-  const dt = new Date(Date.UTC(Y, M - 1, D));
-  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+const today = () => ymd(new Date());
+const addDays = (s, n) => {
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
   return ymd(dt);
-}
+};
+const isYMD = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v);
 
-function todayYMD() {
-  return ymd(new Date());
-}
-
-function setDefaultState(chatId) {
-  const t = todayYMD();
+/* =====================
+   STATE
+===================== */
+function setDefault(chatId) {
+  const t = today();
   if (!chatState.has(chatId)) {
     chatState.set(chatId, {
-      branch: "branch1",
       from: t,
       to: t,
-      mode: "day", // day | range | year
-      products: { category: null, page: 1, limit: 10 },
+      mode: "day",
+      products: { category: null, page: 1, limit: 1000 },
     });
-    return;
   }
-  const st = chatState.get(chatId) || {};
-  if (!st.branch) st.branch = "branch1";
-  if (!st.from) st.from = t;
-  if (!st.to) st.to = t;
-  if (!st.mode) st.mode = "day";
-  if (!st.products) st.products = { category: null, page: 1, limit: 10 };
-  if (typeof st.products.page !== "number") st.products.page = 1;
-  if (typeof st.products.limit !== "number") st.products.limit = 10;
-  chatState.set(chatId, st);
 }
-
-function getState(chatId) {
-  setDefaultState(chatId);
+function st(chatId) {
+  setDefault(chatId);
   return chatState.get(chatId);
 }
-
-function setRange(chatId, from, to, mode = "range") {
-  const st = getState(chatId);
-  st.from = from;
-  st.to = to;
-  st.mode = mode;
-  st.products.page = 1;
-  chatState.set(chatId, st);
+function setRange(chatId, from, to, mode) {
+  const s = st(chatId);
+  s.from = from;
+  s.to = to;
+  s.mode = mode;
+  s.products.page = 1;
 }
+const rangeText = (s) => (s.from === s.to ? s.from : `${s.from} → ${s.to}`);
 
-function formatMoney(n) {
-  const x = Math.round(Number(n || 0));
-  return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-}
+/* =====================
+   FORMAT
+===================== */
+const money = (n) =>
+  Math.round(Number(n || 0))
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, " ");
 
-function isValidYMD(s) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
-}
-
-function formatRange(st) {
-  if (st.from === st.to) return st.from;
-  return `${st.from} → ${st.to}`;
-}
-
-// =====================
-// UI
-// =====================
+/* =====================
+   UI
+===================== */
 function mainMenu(chatId) {
-  const st = getState(chatId);
-  const branch = st.branch;
-  const rangeText = formatRange(st);
-
   return {
     reply_markup: {
       inline_keyboard: [
-        [
-          {
-            text: `🏢 Filial: ${branchLabel(branch)}`,
-            callback_data: "BRANCH_MENU",
-          },
-        ],
-        [{ text: `📅 Sana: ${rangeText}`, callback_data: "DATE_MENU" }],
+        [{ text: `📅 Sana: ${rangeText(st(chatId))}`, callback_data: "DATE" }],
         [
           { text: "📊 Hisobot", callback_data: "SUMMARY" },
           { text: "👨‍🍳 Ofitsiantlar", callback_data: "WAITERS" },
         ],
         [
-          { text: "🍽 Top taomlar", callback_data: "TOP_PRODUCTS" },
-          { text: "📦 Mahsulotlar", callback_data: "PRODUCTS_MENU" },
+          { text: "🍕 Top taomlar", callback_data: "TOP_PRODUCTS" },
+          { text: "📦 Mahsulotlar", callback_data: "PRODUCTS" },
         ],
       ],
     },
   };
 }
 
-function branchMenu(chatId) {
-  const st = getState(chatId);
-  const cur = st.branch;
-
-  const mark = (k, label) => (cur === k ? `✅ ${label}` : label);
-
+function dateMenu() {
+  const t = today();
   return {
     reply_markup: {
       inline_keyboard: [
         [
+          { text: "Bugun", callback_data: `SET:${t}:${t}` },
           {
-            text: mark("branch1", "NAVOIY"),
-            callback_data: "SET_BRANCH:branch1",
+            text: "Kecha",
+            callback_data: `SET:${addDays(t, -1)}:${addDays(t, -1)}`,
           },
         ],
         [
-          {
-            text: mark("branch2", "DOSTLIK"),
-            callback_data: "SET_BRANCH:branch2",
-          },
+          { text: "7 kun", callback_data: `SET:${addDays(t, -6)}:${t}` },
+          { text: "30 kun", callback_data: `SET:${addDays(t, -29)}:${t}` },
         ],
-        [
-          {
-            text: mark("branch3", "TORQOR"),
-            callback_data: "SET_BRANCH:branch3",
-          },
-        ],
-        [{ text: "⬅️ Orqaga", callback_data: "BACK_MAIN" }],
+        [{ text: "⬅️ Orqaga", callback_data: "BACK" }],
       ],
     },
   };
 }
 
-function dateMenu(chatId) {
-  const t = todayYMD();
-
-  return {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "🟦 Bugun", callback_data: `SET_RANGE:DAY:${t}:${t}` },
-          {
-            text: "🕘 Kecha",
-            callback_data: `SET_RANGE:DAY:${addDays(t, -1)}:${addDays(t, -1)}`,
-          },
-        ],
-        [
-          {
-            text: "7 kun",
-            callback_data: `SET_RANGE:RANGE:${addDays(t, -6)}:${t}`,
-          },
-          {
-            text: "15 kun",
-            callback_data: `SET_RANGE:RANGE:${addDays(t, -14)}:${t}`,
-          },
-          {
-            text: "30 kun",
-            callback_data: `SET_RANGE:RANGE:${addDays(t, -29)}:${t}`,
-          },
-        ],
-        [
-          {
-            text: "Yillik",
-            callback_data: `SET_RANGE:YEAR:${t.slice(0, 4)}-01-01:${t.slice(
-              0,
-              4
-            )}-12-31`,
-          },
-        ],
-        [{ text: "✍️ Sana yuborish", callback_data: "DATE_HELP" }],
-        [{ text: "⬅️ Orqaga", callback_data: "BACK_MAIN" }],
-      ],
-    },
-  };
-}
-
-function productsMenu(chatId) {
-  const st = getState(chatId);
-  const cat = st.products.category ? st.products.category : "Barchasi";
-
-  return {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: `🏷 Category: ${cat}`, callback_data: "CATEGORIES" }],
-        [
-          { text: "📄 Ro'yxat (page)", callback_data: "PRODUCTS_PAGE" },
-          { text: "🔝 Top 10", callback_data: "PRODUCTS_TOP10" },
-        ],
-        [{ text: "⬅️ Orqaga", callback_data: "BACK_MAIN" }],
-      ],
-    },
-  };
-}
-
-function productsPager(chatId, meta) {
-  const st = getState(chatId);
-  const page = meta?.page ?? st.products.page;
-  const pages = meta?.pages ?? 1;
-
-  const prevDisabled = page <= 1;
-  const nextDisabled = page >= pages;
-
-  return {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: prevDisabled ? "⬅️" : "⬅️ Oldingi",
-            callback_data: prevDisabled ? "NOOP" : "PRODUCTS_PREV",
-          },
-          { text: `📄 ${page}/${pages}`, callback_data: "NOOP" },
-          {
-            text: nextDisabled ? "➡️" : "Keyingi ➡️",
-            callback_data: nextDisabled ? "NOOP" : "PRODUCTS_NEXT",
-          },
-        ],
-        [{ text: "🏷 Category tanlash", callback_data: "CATEGORIES" }],
-        [{ text: "⬅️ Orqaga", callback_data: "PRODUCTS_MENU" }],
-      ],
-    },
-  };
-}
-
-// =====================
-// API wrappers
-// =====================
-async function apiSummary(branch, from, to) {
-  const res = await API.get("/reports/summary", {
-    params: { branch, from, to },
+/* =====================
+   API
+===================== */
+async function api(url, params) {
+  const r = await API.get(url, {
+    params: { branch: BRANCH, ...params },
   });
-  return res.data?.data;
+  return r.data;
 }
 
-async function apiWaiters(branch, from, to, page = 1, limit = 20) {
-  const res = await API.get("/reports/waiters", {
-    params: { branch, from, to, page, limit },
-  });
-  return res.data;
-}
-
-async function apiTopProducts(branch, from, to, limit = 10, category = null) {
-  const params = { branch, from, to, limit };
-  if (category) params.category = category;
-  const res = await API.get("/reports/top-products", { params });
-  return res.data;
-}
-
-async function apiCategories(branch, from, to) {
-  const res = await API.get("/reports/categories", {
-    params: { branch, from, to },
-  });
-  return res.data;
-}
-
-async function apiProducts(branch, from, to, page, limit, category = null) {
-  const params = { branch, from, to, page, limit };
-  if (category) params.category = category;
-  const res = await API.get("/reports/products", { params });
-  return res.data;
-}
-
-// =====================
-// COMMANDS
-// =====================
-bot.onText(/^\/start$/, async (msg) => {
+/* =====================
+   COMMANDS
+===================== */
+bot.onText(/^\/start$/, (msg) => {
   const chatId = msg.chat.id;
-  authState.set(chatId, { authorized: false });
-  setDefaultState(chatId);
-  return bot.sendMessage(chatId, "🔐 Botga kirish uchun parolni yuboring:");
+  authState.set(chatId, false);
+  setDefault(chatId);
+  bot.sendMessage(chatId, "🔐 Parolni kiriting:");
 });
 
-bot.onText(/^\/logout$/, async (msg) => {
-  const chatId = msg.chat.id;
-  authState.set(chatId, { authorized: false });
-  return bot.sendMessage(
-    chatId,
-    "🔒 Siz tizimdan chiqdingiz. Parolni qayta yuboring:"
-  );
+bot.onText(/^\/logout$/, (msg) => {
+  authState.set(msg.chat.id, false);
+  bot.sendMessage(msg.chat.id, "🔒 Chiqildi. Parolni qayta kiriting:");
 });
 
-// =====================
-// CALLBACKS
-// =====================
+/* =====================
+   CALLBACKS
+===================== */
 bot.on("callback_query", async (q) => {
   const chatId = q.message.chat.id;
   const data = q.data;
 
-  try {
-    if (!isAuthorized(chatId)) {
-      await bot.answerCallbackQuery(q.id, { text: "Avval parol kiriting" });
-      return bot.sendMessage(
-        chatId,
-        "🔐 Avval parolni kiriting. /start bosing."
-      );
-    }
+  if (!authState.get(chatId)) {
+    return bot.sendMessage(chatId, "🔐 Avval parol kiriting");
+  }
 
-    if (data === "NOOP") return bot.answerCallbackQuery(q.id);
+  if (data === "BACK") {
+    return bot.sendMessage(chatId, "Asosiy menyu:", mainMenu(chatId));
+  }
 
-    if (data === "BACK_MAIN") {
-      await bot.answerCallbackQuery(q.id);
-      return bot.sendMessage(chatId, "Asosiy menyu:", mainMenu(chatId));
-    }
+  if (data === "DATE") {
+    return bot.sendMessage(chatId, "📅 Sana:", dateMenu());
+  }
 
-    // Branch
-    if (data === "BRANCH_MENU") {
-      await bot.answerCallbackQuery(q.id);
-      return bot.sendMessage(chatId, "Filialni tanlang:", branchMenu(chatId));
-    }
+  if (data.startsWith("SET:")) {
+    const [, from, to] = data.split(":");
+    setRange(chatId, from, to, from === to ? "day" : "range");
+    return bot.sendMessage(chatId, "✅ Sana tanlandi", mainMenu(chatId));
+  }
 
-    if (data.startsWith("SET_BRANCH:")) {
-      const branch = data.split(":")[1];
-      const st = getState(chatId);
-      st.branch = branch;
-      chatState.set(chatId, st);
+  /* ===== SUMMARY (FOYDA QO‘SHILDI) ===== */
+  if (data === "SUMMARY") {
+    const s = st(chatId);
+    const d = (await api("/reports/summary", s)).data;
 
-      await bot.answerCallbackQuery(q.id, {
-        text: `Filial: ${branchLabel(branch)}`,
-      });
-      return bot.sendMessage(
-        chatId,
-        `✅ Filial o'zgardi: ${branchLabel(branch)}`,
-        mainMenu(chatId)
-      );
-    }
+   return bot.sendMessage(
+     chatId,
+     `📊 HISOBOT (${BRANCH_LABEL})\n` +
+       `📅 ${rangeText(s)}\n\n` +
+       `🧾 Buyurtmalar: ${d.ordersCount}\n` +
+       `💰 Umumiy tushum: ${money(d.revenueTotal)} so'm\n\n` +
+       `💵 Naqd: ${money(d.payments?.cash || 0)} so'm\n` +
+       `💳 Karta: ${money(d.payments?.card || 0)} so'm\n` +
+       `📲 Click: ${money(d.payments?.click || 0)} so'm\n\n` +
+       `📈 Sof foyda: ${money(d.profitTotal || 0)} so'm`,
+     mainMenu(chatId)
+   );
+  }
 
-    // Date
-    if (data === "DATE_MENU") {
-      await bot.answerCallbackQuery(q.id);
-      return bot.sendMessage(chatId, "📅 Tez filtrlar:", dateMenu(chatId));
-    }
+  /* ===== WAITERS ===== */
+  if (data === "WAITERS") {
+    const s = st(chatId);
+    const rows = (await api("/reports/waiters", s)).data || [];
 
-    if (data === "DATE_HELP") {
-      await bot.answerCallbackQuery(q.id);
-      return bot.sendMessage(
-        chatId,
-        `✍️ Sana yuborish:\n` +
-          `1) Bitta kun: 2025-09-26\n` +
-          `2) Oraliq: 2025-09-01 2025-09-30\n\n` +
-          `Format: YYYY-MM-DD`
-      );
-    }
+    if (!rows.length)
+      return bot.sendMessage(chatId, "Ma’lumot yo‘q", mainMenu(chatId));
 
-    if (data.startsWith("SET_RANGE:")) {
-      const parts = data.split(":");
-      const type = parts[1];
-      const from = parts[2];
-      const to = parts[3];
-
-      setRange(
-        chatId,
-        from,
-        to,
-        type === "YEAR" ? "year" : type === "DAY" ? "day" : "range"
-      );
-
-      await bot.answerCallbackQuery(q.id, {
-        text: `Sana: ${from === to ? from : `${from}→${to}`}`,
-      });
-      return bot.sendMessage(
-        chatId,
-        `✅ Sana tanlandi: ${from === to ? from : `${from} → ${to}`}`,
-        mainMenu(chatId)
-      );
-    }
-
-    // =====================
-    // SUMMARY (backend total base+bonus qaytaradi)
-    // =====================
-    if (data === "SUMMARY") {
-      const st = getState(chatId);
-      await bot.answerCallbackQuery(q.id);
-
-      const d = await apiSummary(st.branch, st.from, st.to);
-
-      const text =
-        `📊 Hisobot\n` +
-        `🏢 Filial: ${branchLabel(st.branch)}\n` +
-        `📅 Sana: ${formatRange(st)}\n\n` +
-        `🧾 Buyurtmalar: ${d?.ordersCount ?? 0}\n` +
-        `💰 Tushum: ${formatMoney(d?.revenueTotal ?? 0)}\n` +
-        `🧾 O'rtacha chek: ${formatMoney(d?.avgCheck ?? 0)}\n\n` +
-        `👨‍🍳 Ofitsiantlar oylik:\n` +
-        `   • Asosiy: ${formatMoney(d?.waitersBaseSalaryTotal ?? 0)}\n` +
-        `   • Bonus (7%): ${formatMoney(d?.waitersBonusSalaryTotal ?? 0)}\n` +
-        `   • Jami: ${formatMoney(d?.waitersSalaryTotal ?? 0)}\n\n` +
-        `💵 Naqd: ${formatMoney(d?.payments?.cash ?? 0)}\n` +
-        `💳 Karta: ${formatMoney(d?.payments?.card ?? 0)}\n` +
-        `📲 Click: ${formatMoney(d?.payments?.click ?? 0)}`;
-
-      return bot.sendMessage(chatId, text, mainMenu(chatId));
-    }
-
-    // =====================
-    // WAITERS (backend hisoblaganini chiqaramiz)
-    // =====================
-    if (data === "WAITERS") {
-      const st = getState(chatId);
-      await bot.answerCallbackQuery(q.id);
-
-      const res = await apiWaiters(st.branch, st.from, st.to, 1, 50);
-      const rows = res?.data || [];
-
-      if (!rows.length) {
-        return bot.sendMessage(
-          chatId,
-          "Bu sanada ofitsiantlar bo'yicha data yo'q.",
-          mainMenu(chatId)
-        );
-      }
-
-      const text =
-        `👨‍🍳 Ofitsiantlar\n` +
-        `🏢 ${branchLabel(st.branch)}\n` +
-        `📅 ${formatRange(st)}\n\n` +
+    return bot.sendMessage(
+      chatId,
+      `👨‍🍳 Ofitsiantlar\n📅 ${rangeText(s)}\n\n` +
         rows
-          .map((w, i) => {
-            const basePercent = Number(w.basePercent ?? 10);
-            const baseSalary = Number(w.baseSalary ?? 0);
-            const bonusSalary = Number(w.bonusSalary ?? 0);
-            const totalSalary = Number(
-              w.totalSalary ?? baseSalary + bonusSalary
-            );
-
-            return (
+          .map(
+            (w, i) =>
               `${i + 1}) ${w.waiter_name}\n` +
-              `   🧾 ${w.ordersCount} ta | 💰 ${formatMoney(
-                w.revenueTotal
-              )}\n` +
-              `   👨‍🍳 Oylik:\n` +
-              `      • Asosiy (${basePercent}%): ${formatMoney(baseSalary)}\n` +
-              `      • Oylik (7%): ${formatMoney(bonusSalary)}\n` +
-              `      `
-            );
-          })
-          .join("\n\n");
+              `   🧾 ${w.ordersCount} | 💰 ${money(w.revenueTotal)}\n` +
+              `   💵 Oylik: ${money(w.totalSalary)}`
+          )
+          .join("\n\n"),
+      mainMenu(chatId)
+    );
+  }
 
-      return bot.sendMessage(chatId, text, mainMenu(chatId));
-    }
+  /* ===== TOP PRODUCTS ===== */
+  if (data === "TOP_PRODUCTS") {
+    const s = st(chatId);
+    const rows = (await api("/reports/top-products", s)).data || [];
 
-    // =====================
-    // TOP PRODUCTS
-    // =====================
-    if (data === "TOP_PRODUCTS") {
-      const st = getState(chatId);
-      await bot.answerCallbackQuery(q.id);
+    if (!rows.length)
+      return bot.sendMessage(chatId, "Top mahsulotlar yo‘q", mainMenu(chatId));
 
-      const res = await apiTopProducts(
-        st.branch,
-        st.from,
-        st.to,
-        10,
-        st.products.category
-      );
-      const rows = res?.data || [];
-
-      if (!rows.length) {
-        return bot.sendMessage(
-          chatId,
-          "Bu sanada top taomlar data yo'q.",
-          mainMenu(chatId)
-        );
-      }
-
-      const text =
-        `🍽 Top taomlar (Top 10)\n` +
-        `🏢 ${branchLabel(st.branch)}\n` +
-        `📅 ${formatRange(st)}\n` +
-        `🏷 ${
-          st.products.category
-            ? `Category: ${st.products.category}`
-            : "Category: Barchasi"
-        }\n\n` +
+    return bot.sendMessage(
+      chatId,
+      `🍕 Top mahsulotlar\n📅 ${rangeText(s)}\n\n` +
         rows
           .map(
             (p, i) =>
-              `${i + 1}) ${p.name} (${p.category_name || "-"})\n   📦 ${
-                p.totalQty
-              } | 💰 ${formatMoney(p.revenueTotal)}`
+              `${i + 1}) ${p.name}\n` +
+              `   📦 ${p.totalQty} | 💰 ${money(p.revenueTotal)}`
           )
-          .join("\n");
+          .join("\n"),
+      mainMenu(chatId)
+    );
+  }
 
-      return bot.sendMessage(chatId, text, mainMenu(chatId));
-    }
+  /* ===== PRODUCTS ===== */
+  if (data === "PRODUCTS") {
+    const s = st(chatId);
+    const r = await api("/reports/products", {
+      ...s,
+      page: s.products.page,
+      limit: s.products.limit,
+    });
 
-    // =====================
-    // PRODUCTS MENU
-    // =====================
-    if (data === "PRODUCTS_MENU") {
-      await bot.answerCallbackQuery(q.id);
-      return bot.sendMessage(
-        chatId,
-        "📦 Mahsulotlar menyusi:",
-        productsMenu(chatId)
-      );
-    }
+    const items = r.data || [];
+    if (!items.length)
+      return bot.sendMessage(chatId, "Mahsulotlar yo‘q", mainMenu(chatId));
 
-    // =====================
-    // CATEGORIES
-    // =====================
-    if (data === "CATEGORIES") {
-      const st = getState(chatId);
-      await bot.answerCallbackQuery(q.id);
-
-      const catsRes = await apiCategories(st.branch, st.from, st.to);
-      const cats = (catsRes?.data || [])
-        .map((x) => (typeof x === "string" ? x : x.category))
-        .filter(Boolean);
-
-      const kb = [];
-      kb.push([
-        {
-          text: st.products.category ? "Barchasi" : "✅ Barchasi",
-          callback_data: "SET_CATEGORY:__ALL__",
-        },
-      ]);
-
-      for (let i = 0; i < cats.length; i += 2) {
-        const a = cats[i];
-        const b = cats[i + 1];
-
-        const row = [
-          {
-            text: st.products.category === a ? `✅ ${a}` : a,
-            callback_data: `SET_CATEGORY:${a}`,
-          },
-        ];
-        if (b)
-          row.push({
-            text: st.products.category === b ? `✅ ${b}` : b,
-            callback_data: `SET_CATEGORY:${b}`,
-          });
-
-        kb.push(row);
-      }
-
-      kb.push([{ text: "⬅️ Orqaga", callback_data: "PRODUCTS_MENU" }]);
-
-      return bot.sendMessage(chatId, "🏷 Category tanlang:", {
-        reply_markup: { inline_keyboard: kb },
-      });
-    }
-
-    if (data.startsWith("SET_CATEGORY:")) {
-      const st = getState(chatId);
-      const cat = data.split(":").slice(1).join(":");
-      st.products.category = cat === "__ALL__" ? null : cat;
-      st.products.page = 1;
-      chatState.set(chatId, st);
-
-      await bot.answerCallbackQuery(q.id, {
-        text: `Category: ${st.products.category || "Barchasi"}`,
-      });
-      return bot.sendMessage(
-        chatId,
-        `✅ Category tanlandi: ${st.products.category || "Barchasi"}`,
-        productsMenu(chatId)
-      );
-    }
-
-    // =====================
-    // PRODUCTS PAGE
-    // =====================
-    if (data === "PRODUCTS_PAGE") {
-      const st = getState(chatId);
-      await bot.answerCallbackQuery(q.id);
-
-      const page = st.products.page || 1;
-      const limit = st.products.limit || 10;
-
-      const res = await apiProducts(
-        st.branch,
-        st.from,
-        st.to,
-        page,
-        limit,
-        st.products.category
-      );
-      const items = res?.data || [];
-      const meta = res?.meta || { page, pages: 1, total: items.length, limit };
-
-      if (!items.length) {
-        return bot.sendMessage(
-          chatId,
-          "Bu sanada mahsulotlar bo'yicha data yo'q.",
-          productsMenu(chatId)
-        );
-      }
-
-      const head =
-        `📦 Mahsulotlar\n` +
-        `🏢 ${branchLabel(st.branch)}\n` +
-        `📅 ${formatRange(st)}\n` +
-        `🏷 ${
-          st.products.category
-            ? `Category: ${st.products.category}`
-            : "Category: Barchasi"
-        }\n\n`;
-
-      const body = items
-        .map(
-          (x, i) =>
-            `${(page - 1) * limit + (i + 1)}) ${x.name}\n` +
-            `   📦 ${x.totalQty} | 💵 ${formatMoney(
-              x.avgPrice
-            )} | 💰 ${formatMoney(x.revenueTotal)} | 🧾 ${x.ordersCount}`
-        )
-        .join("\n");
-
-      return bot.sendMessage(chatId, head + body, productsPager(chatId, meta));
-    }
-
-    if (data === "PRODUCTS_PREV") {
-      const st = getState(chatId);
-      st.products.page = Math.max((st.products.page || 1) - 1, 1);
-      chatState.set(chatId, st);
-      await bot.answerCallbackQuery(q.id);
-      return bot.emit("callback_query", { ...q, data: "PRODUCTS_PAGE" });
-    }
-
-    if (data === "PRODUCTS_NEXT") {
-      const st = getState(chatId);
-      st.products.page = (st.products.page || 1) + 1;
-      chatState.set(chatId, st);
-      await bot.answerCallbackQuery(q.id);
-      return bot.emit("callback_query", { ...q, data: "PRODUCTS_PAGE" });
-    }
-
-    // =====================
-    // PRODUCTS TOP10
-    // =====================
-    if (data === "PRODUCTS_TOP10") {
-      const st = getState(chatId);
-      await bot.answerCallbackQuery(q.id);
-
-      const res = await apiProducts(
-        st.branch,
-        st.from,
-        st.to,
-        1,
-        10,
-        st.products.category
-      );
-      const items = res?.data || [];
-
-      if (!items.length) {
-        return bot.sendMessage(
-          chatId,
-          "Bu sanada mahsulotlar bo'yicha data yo'q.",
-          productsMenu(chatId)
-        );
-      }
-
-      const text =
-        `📦 Mahsulotlar (Top 10)\n` +
-        `🏢 ${branchLabel(st.branch)}\n` +
-        `📅 ${formatRange(st)}\n` +
-        `🏷 ${
-          st.products.category
-            ? `Category: ${st.products.category}`
-            : "Category: Barchasi"
-        }\n\n` +
+    return bot.sendMessage(
+      chatId,
+      `📦 Mahsulotlar\n📅 ${rangeText(s)}\n\n` +
         items
           .map(
             (x, i) =>
               `${i + 1}) ${x.name}\n` +
-              `   📦 ${x.totalQty} | 💵 ${formatMoney(
-                x.avgPrice
-              )} | 💰 ${formatMoney(x.revenueTotal)} | 🧾 ${x.ordersCount}`
+              `   📦 ${x.totalQty} | 💰 ${money(x.revenueTotal)}`
           )
-          .join("\n");
-
-      return bot.sendMessage(chatId, text, productsMenu(chatId));
-    }
-
-    await bot.answerCallbackQuery(q.id);
-  } catch (err) {
-    try {
-      await bot.answerCallbackQuery(q.id, { text: "Xatolik" });
-    } catch (_) {}
-
-    const msgText =
-      "❌ Xatolik yuz berdi.\n" +
-      (err.response?.data?.message
-        ? `message: ${err.response.data.message}\n`
-        : "") +
-      (err.message ? `error: ${err.message}` : "");
-
-    return bot.sendMessage(chatId, msgText);
+          .join("\n"),
+      mainMenu(chatId)
+    );
   }
 });
 
-// =====================
-// MESSAGE (PASSWORD + DATE/RANGE)
-// =====================
-bot.on("message", async (msg) => {
+/* =====================
+   TEXT INPUT
+===================== */
+bot.on("message", (msg) => {
   const chatId = msg.chat.id;
   const text = String(msg.text || "").trim();
 
   if (text.startsWith("/")) return;
-  setDefaultState(chatId);
 
-  // Password
-  if (!isAuthorized(chatId)) {
+  if (!authState.get(chatId)) {
     if (text === BOT_PASSWORD) {
-      authState.set(chatId, { authorized: true });
-      const st = getState(chatId);
+      authState.set(chatId, true);
       return bot.sendMessage(
         chatId,
-        `✅ Kirish muvaffaqiyatli!\n🏢 Filial: ${branchLabel(
-          st.branch
-        )}\n📅 Sana: ${formatRange(
-          st
-        )}\n\nMenyudan foydalaning yoki sana yuboring.`,
+        `✅ Kirish muvaffaqiyatli\n🏢 ${BRANCH_LABEL}\n📅 ${rangeText(
+          st(chatId)
+        )}`,
         mainMenu(chatId)
       );
     }
-    return bot.sendMessage(chatId, "❌ Parol noto'g'ri. Qayta urinib ko'ring:");
+    return bot.sendMessage(chatId, "❌ Parol noto‘g‘ri");
   }
 
-  // One date
-  if (isValidYMD(text)) {
+  if (isYMD(text)) {
     setRange(chatId, text, text, "day");
-    return bot.sendMessage(
-      chatId,
-      `✅ Sana tanlandi: ${text}`,
-      mainMenu(chatId)
-    );
+    return bot.sendMessage(chatId, "✅ Sana tanlandi", mainMenu(chatId));
   }
 
-  // Range
-  const parts = text.split(/\s+/).filter(Boolean);
-  if (parts.length === 2 && isValidYMD(parts[0]) && isValidYMD(parts[1])) {
-    const from = parts[0];
-    const to = parts[1];
-    setRange(chatId, from, to, "range");
-    return bot.sendMessage(
-      chatId,
-      `✅ Sana tanlandi: ${from} → ${to}`,
-      mainMenu(chatId)
-    );
+  const p = text.split(" ");
+  if (p.length === 2 && isYMD(p[0]) && isYMD(p[1])) {
+    setRange(chatId, p[0], p[1], "range");
+    return bot.sendMessage(chatId, "✅ Sana tanlandi", mainMenu(chatId));
   }
-
-  return bot.sendMessage(
-    chatId,
-    "ℹ️ Buyruqlar:\n- Bitta sana: 2025-09-26\n- Oraliq: 2025-09-01 2025-09-30\nYoki menyudan foydalaning."
-  );
 });
 
-console.log("🤖 Bot running (polling)...");
+console.log("🤖 BOT RUNNING (GLOBAL ORDERS)");

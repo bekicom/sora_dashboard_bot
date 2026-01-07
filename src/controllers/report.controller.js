@@ -1,18 +1,26 @@
 const { getBranchKeyFromReq, getConn } = require("../config/dbManager");
 const getOrderModel = require("../models/Order");
 
-// =====================
-// Helpers
-// =====================
+/* =====================
+   HELPERS
+   ===================== */
 function isValidYMD(s) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
 }
 
-// convert any value to number safely (string/null/undefined -> default)
+// safe number convert
 const TO_NUM = (expr, def = 0) => ({
-  $convert: { input: expr, to: "double", onError: def, onNull: def },
+  $convert: {
+    input: expr,
+    to: "double",
+    onError: def,
+    onNull: def,
+  },
 });
 
+/* =====================
+   CONSTANTS
+   ===================== */
 const SABOY_NAMES = [
   "saboy",
   "saboiy",
@@ -22,40 +30,35 @@ const SABOY_NAMES = [
   "samovyvoz",
 ];
 
-// Normalize waiter_name (lower + trim)
+// normalize waiter name
 const WAITER_NAME_NORM_EXPR = {
   $toLower: { $trim: { input: { $ifNull: ["$waiter_name", ""] } } },
 };
 
 const IS_SABOY_EXPR = { $in: [WAITER_NAME_NORM_EXPR, SABOY_NAMES] };
 
-// Numeric fields (always number)
+// numeric fields
 const FINAL_TOTAL_NUM = TO_NUM("$final_total", 0);
-const TOTAL_PRICE_NUM = TO_NUM("$total_price", 0);
 const SERVICE_AMOUNT_NUM = TO_NUM("$service_amount", 0);
+const TOTAL_PRICE_NUM = TO_NUM("$total_price", 0);
+const TOTAL_PROFIT_NUM = TO_NUM("$total_profit", 0);
 const WAITER_PERCENT_NUM = TO_NUM("$waiter_percentage", 10);
 
-// waiter_percentage can be 0/7/10/... (default: 10 if null/undefined)
-const WAITER_PERCENT_EXPR = WAITER_PERCENT_NUM;
-
-// Saboy => 0%, else given percent
+// waiter percent (saboy = 0%)
 const WAITER_PERCENT_EFFECTIVE_EXPR = {
-  $cond: [IS_SABOY_EXPR, 0, WAITER_PERCENT_EXPR],
+  $cond: [IS_SABOY_EXPR, 0, WAITER_PERCENT_NUM],
 };
 
-// ✅ Salary base: total_price (preferred)
-// fallback: max(final_total - service_amount, 0)
+// salary base
 const SALARY_BASE_EXPR = {
   $cond: [
     { $gt: [TOTAL_PRICE_NUM, 0] },
     TOTAL_PRICE_NUM,
-    {
-      $max: [{ $subtract: [FINAL_TOTAL_NUM, SERVICE_AMOUNT_NUM] }, 0],
-    },
+    { $max: [{ $subtract: [FINAL_TOTAL_NUM, SERVICE_AMOUNT_NUM] }, 0] },
   ],
 };
 
-// ✅ Base salary per order: salaryBase * waiterPercentEffective / 100
+// salary calculations
 const BASE_SALARY_EXPR = {
   $multiply: [
     SALARY_BASE_EXPR,
@@ -63,18 +66,17 @@ const BASE_SALARY_EXPR = {
   ],
 };
 
-// ✅ Bonus salary per order: salaryBase * 7%
-// Saboy => 0
 const BONUS_SALARY_EXPR = {
-  $cond: [IS_SABOY_EXPR, 0, { $multiply: [SALARY_BASE_EXPR, 0.07] }],
+  $cond: [IS_SABOY_EXPR, 0, { $multiply: [SALARY_BASE_EXPR, 0.05] }],
 };
 
-// ✅ Total salary per order
-const TOTAL_SALARY_EXPR = { $add: [BASE_SALARY_EXPR, BONUS_SALARY_EXPR] };
+const TOTAL_SALARY_EXPR = {
+  $add: [BASE_SALARY_EXPR, BONUS_SALARY_EXPR],
+};
 
-// =====================
-// Payments normalize
-// =====================
+/* =====================
+   PAYMENTS NORMALIZE
+   ===================== */
 const PAYMENTS_UNIFIED_EXPR = {
   $cond: [
     {
@@ -84,89 +86,52 @@ const PAYMENTS_UNIFIED_EXPR = {
       ],
     },
     "$mixedPaymentDetails",
-    {
-      $cond: [
-        {
-          $and: [
-            { $ne: ["$mixedPaymentDetails", null] },
-            { $eq: [{ $type: "$mixedPaymentDetails" }, "object"] },
-          ],
-        },
-        [
-          {
-            method: "cash",
-            amount: TO_NUM("$mixedPaymentDetails.cashAmount", 0),
-          },
-          {
-            method: "card",
-            amount: TO_NUM("$mixedPaymentDetails.cardAmount", 0),
-          },
-          {
-            method: "click",
-            amount: TO_NUM("$mixedPaymentDetails.clickAmount", 0),
-          },
-        ],
-        [
-          {
-            method: { $toLower: { $ifNull: ["$paymentMethod", "unknown"] } },
-            amount: TO_NUM({ $ifNull: ["$paymentAmount", "$final_total"] }, 0),
-          },
-        ],
-      ],
-    },
+    [
+      {
+        method: { $toLower: { $ifNull: ["$paymentMethod", "unknown"] } },
+        amount: TO_NUM({ $ifNull: ["$paymentAmount", "$final_total"] }, 0),
+      },
+    ],
   ],
 };
 
-// =====================
-// GET /reports/summary
-// =====================
+/* ============================================================
+   GET /reports/summary
+   ✅ TUSHUM + FOYDA
+   ============================================================ */
 exports.getSummary = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
     const conn = getConn(branchKey);
-
-    if (!conn) {
+    if (!conn)
       return res.status(400).json({
         ok: false,
-        message: `DB connection not ready for branch: ${branchKey}`,
+        message: `DB connection not ready: ${branchKey}`,
       });
-    }
 
-    const from = String(req.query.from || "").trim();
-    const to = String(req.query.to || "").trim();
+    const from = String(req.query.from || "");
+    const to = String(req.query.to || "");
 
-    if (!isValidYMD(from) || !isValidYMD(to)) {
+    if (!isValidYMD(from) || !isValidYMD(to))
       return res.status(400).json({
         ok: false,
-        message:
-          "from/to format xato. Format: YYYY-MM-DD. Misol: from=2025-12-21&to=2025-12-21",
+        message: "from/to format xato (YYYY-MM-DD)",
       });
-    }
 
     const Order = getOrderModel(conn);
 
-    const match = {
-      status: "paid",
-      order_date: { $gte: from, $lte: to },
-    };
-
     const pipeline = [
-      { $match: match },
-
+      { $match: { status: "paid", order_date: { $gte: from, $lte: to } } },
       {
         $addFields: {
           waiterNameNorm: WAITER_NAME_NORM_EXPR,
           paymentsUnified: PAYMENTS_UNIFIED_EXPR,
-
           salaryBase: SALARY_BASE_EXPR,
-          waiterPercentEffective: WAITER_PERCENT_EFFECTIVE_EXPR,
-
           baseSalaryCalc: BASE_SALARY_EXPR,
           bonusSalaryCalc: BONUS_SALARY_EXPR,
-          totalWaiterSalaryCalc: TOTAL_SALARY_EXPR,
+          totalSalaryCalc: TOTAL_SALARY_EXPR,
         },
       },
-
       {
         $facet: {
           summary: [
@@ -174,15 +139,10 @@ exports.getSummary = async (req, res) => {
               $group: {
                 _id: null,
                 ordersCount: { $sum: 1 },
-
                 revenueTotal: { $sum: FINAL_TOTAL_NUM },
+                profitTotal: { $sum: TOTAL_PROFIT_NUM },
                 avgCheck: { $avg: FINAL_TOTAL_NUM },
-
-                salaryBaseTotal: { $sum: "$salaryBase" },
-
-                waitersBaseSalaryTotal: { $sum: "$baseSalaryCalc" },
-                waitersBonusSalaryTotal: { $sum: "$bonusSalaryCalc" },
-                waitersSalaryTotal: { $sum: "$totalWaiterSalaryCalc" },
+                waitersSalaryTotal: { $sum: "$totalSalaryCalc" },
               },
             },
             {
@@ -190,24 +150,18 @@ exports.getSummary = async (req, res) => {
                 _id: 0,
                 ordersCount: 1,
                 revenueTotal: 1,
+                profitTotal: { $ifNull: ["$profitTotal", 0] },
                 avgCheck: { $ifNull: ["$avgCheck", 0] },
-
-                salaryBaseTotal: 1,
-                waitersBaseSalaryTotal: 1,
-                waitersBonusSalaryTotal: 1,
                 waitersSalaryTotal: 1,
               },
             },
           ],
-
           payments: [
             { $unwind: "$paymentsUnified" },
             {
               $group: {
-                _id: {
-                  $toLower: { $ifNull: ["$paymentsUnified.method", "unknown"] },
-                },
-                total: { $sum: TO_NUM("$paymentsUnified.amount", 0) },
+                _id: "$paymentsUnified.method",
+                total: { $sum: "$paymentsUnified.amount" },
               },
             },
             { $project: { _id: 0, method: "$_id", total: 1 } },
@@ -221,30 +175,23 @@ exports.getSummary = async (req, res) => {
     const summary = agg?.[0]?.summary?.[0] || {
       ordersCount: 0,
       revenueTotal: 0,
+      profitTotal: 0,
       avgCheck: 0,
-      salaryBaseTotal: 0,
-      waitersBaseSalaryTotal: 0,
-      waitersBonusSalaryTotal: 0,
       waitersSalaryTotal: 0,
     };
 
-    const paymentsArr = agg?.[0]?.payments || [];
     const payments = { cash: 0, card: 0, click: 0 };
-
-    for (const p of paymentsArr) {
-      const method = String(p.method || "").toLowerCase();
-      const total = Number(p.total || 0);
-
-      if (method === "cash") payments.cash += total;
-      else if (method === "card") payments.card += total;
-      else if (method === "click") payments.click += total;
+    for (const p of agg?.[0]?.payments || []) {
+      if (payments[p.method] !== undefined) {
+        payments[p.method] += p.total;
+      }
     }
 
     return res.json({
       ok: true,
       data: {
-        range: { from, to },
         branch: branchKey,
+        range: { from, to },
         ...summary,
         payments,
       },
@@ -258,14 +205,14 @@ exports.getSummary = async (req, res) => {
   }
 };
 
-// =====================
-// GET /reports/waiters
-// =====================
+/* ============================================================
+   GET /reports/waiters
+   ✅ OFITSIANTLAR HISOBOTI
+   ============================================================ */
 exports.getWaitersReport = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
     const conn = getConn(branchKey);
-
     if (!conn) {
       return res.status(400).json({
         ok: false,
@@ -286,11 +233,9 @@ exports.getWaitersReport = async (req, res) => {
     const page = Number.isFinite(parseInt(req.query.page, 10))
       ? Math.max(parseInt(req.query.page, 10), 1)
       : 1;
-
     const limit = Number.isFinite(parseInt(req.query.limit, 10))
       ? Math.min(Math.max(parseInt(req.query.limit, 10), 1), 100)
       : 10;
-
     const skip = (page - 1) * limit;
 
     const Order = getOrderModel(conn);
@@ -302,40 +247,30 @@ exports.getWaitersReport = async (req, res) => {
 
     const pipeline = [
       { $match: match },
-
       {
         $addFields: {
           waiterNameNorm: WAITER_NAME_NORM_EXPR,
           isSaboy: IS_SABOY_EXPR,
-
           salaryBase: SALARY_BASE_EXPR,
           waiterPercentEffective: WAITER_PERCENT_EFFECTIVE_EXPR,
-
           baseSalaryCalc: BASE_SALARY_EXPR,
           bonusSalaryCalc: BONUS_SALARY_EXPR,
           totalSalaryCalc: TOTAL_SALARY_EXPR,
         },
       },
-
       {
         $group: {
           _id: { $ifNull: ["$waiter_name", "Noma'lum"] },
           ordersCount: { $sum: 1 },
-
           revenueTotal: { $sum: FINAL_TOTAL_NUM },
-
           salaryBaseTotal: { $sum: "$salaryBase" },
-
           baseSalary: { $sum: "$baseSalaryCalc" },
           bonusSalary: { $sum: "$bonusSalaryCalc" },
           totalSalary: { $sum: "$totalSalaryCalc" },
-
           anySaboy: { $max: { $cond: ["$isSaboy", 1, 0] } },
-
           percents: { $addToSet: "$waiterPercentEffective" },
         },
       },
-
       {
         $addFields: {
           basePercent: {
@@ -347,9 +282,7 @@ exports.getWaitersReport = async (req, res) => {
           },
         },
       },
-
       { $sort: { revenueTotal: -1 } },
-
       {
         $facet: {
           items: [{ $skip: skip }, { $limit: limit }],
@@ -359,7 +292,6 @@ exports.getWaitersReport = async (req, res) => {
     ];
 
     const agg = await Order.aggregate(pipeline);
-
     const items = agg?.[0]?.items || [];
     const total = agg?.[0]?.total?.[0]?.count || 0;
 
@@ -369,17 +301,12 @@ exports.getWaitersReport = async (req, res) => {
         waiter_name: x._id,
         ordersCount: x.ordersCount || 0,
         revenueTotal: x.revenueTotal || 0,
-
         salaryBaseTotal: Number(x.salaryBaseTotal || 0),
-
         basePercent: Number(x.basePercent ?? 0),
         baseSalary: Number(x.baseSalary || 0),
-
-        bonusPercent: 7,
+        bonusPercent: 5,
         bonusSalary: Number(x.bonusSalary || 0),
-
         totalSalary: Number(x.totalSalary || 0),
-
         isSaboy: Number(x.anySaboy || 0) === 1,
       })),
       meta: {
@@ -398,14 +325,14 @@ exports.getWaitersReport = async (req, res) => {
   }
 };
 
-// =====================
-// GET /reports/products
-// =====================
+/* ============================================================
+   GET /reports/products
+   ✅ MAHSULOTLAR HISOBOTI (TO'G'RILANDI)
+   ============================================================ */
 exports.getProductsReport = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
     const conn = getConn(branchKey);
-
     if (!conn) {
       return res.status(400).json({
         ok: false,
@@ -424,7 +351,6 @@ exports.getProductsReport = async (req, res) => {
     }
 
     const category = String(req.query.category || "").trim();
-
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const limit = Math.min(
       Math.max(parseInt(req.query.limit || "10", 10), 1),
@@ -442,7 +368,6 @@ exports.getProductsReport = async (req, res) => {
     const pipeline = [
       { $match: match },
       { $unwind: "$items" },
-
       ...(category
         ? [
             {
@@ -455,31 +380,38 @@ exports.getProductsReport = async (req, res) => {
             },
           ]
         : []),
-
       {
         $addFields: {
-          itemRevenue: {
-            $multiply: [
-              TO_NUM("$items.price", 0),
-              TO_NUM("$items.quantity", 0),
-            ],
-          },
+          // ✅ TO'G'RI HISOBLASH: line_total allaqachon miqdorga ko'paytirilgan
+          itemRevenue: TO_NUM("$items.line_total", 0),
+          itemQty: TO_NUM("$items.quantity", 0),
         },
       },
-
       {
         $group: {
-          _id: { name: "$items.name", category_name: "$items.category_name" },
-          totalQty: { $sum: TO_NUM("$items.quantity", 0) },
-          avgPrice: { $avg: TO_NUM("$items.price", 0) },
+          _id: {
+            name: "$items.name",
+            category_name: "$items.category_name",
+          },
+          totalQty: { $sum: "$itemQty" },
           revenueTotal: { $sum: "$itemRevenue" },
           ordersSet: { $addToSet: "$_id" },
         },
       },
-
-      { $addFields: { ordersCount: { $size: "$ordersSet" } } },
+      {
+        $addFields: {
+          ordersCount: { $size: "$ordersSet" },
+          // ✅ O'rtacha narx = umumiy daromad / umumiy miqdor
+          avgPrice: {
+            $cond: [
+              { $gt: ["$totalQty", 0] },
+              { $divide: ["$revenueTotal", "$totalQty"] },
+              0,
+            ],
+          },
+        },
+      },
       { $sort: { revenueTotal: -1 } },
-
       {
         $facet: {
           items: [{ $skip: skip }, { $limit: limit }],
@@ -489,7 +421,6 @@ exports.getProductsReport = async (req, res) => {
     ];
 
     const agg = await Order.aggregate(pipeline);
-
     const items = agg?.[0]?.items || [];
     const total = agg?.[0]?.total?.[0]?.count || 0;
 
@@ -498,9 +429,9 @@ exports.getProductsReport = async (req, res) => {
       data: items.map((x) => ({
         name: x._id?.name || "Noma'lum",
         category_name: x._id?.category_name || null,
-        totalQty: x.totalQty || 0,
-        avgPrice: x.avgPrice || 0,
-        revenueTotal: x.revenueTotal || 0,
+        totalQty: Math.round(x.totalQty || 0),
+        avgPrice: Math.round((x.avgPrice || 0) * 100) / 100,
+        revenueTotal: Math.round((x.revenueTotal || 0) * 100) / 100,
         ordersCount: x.ordersCount || 0,
       })),
       meta: {
@@ -520,11 +451,14 @@ exports.getProductsReport = async (req, res) => {
   }
 };
 
+/* ============================================================
+   GET /reports/top-products
+   ✅ TOP MAHSULOTLAR (TO'G'RILANDI)
+   ============================================================ */
 exports.getTopProducts = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
     const conn = getConn(branchKey);
-
     if (!conn) {
       return res.status(400).json({
         ok: false,
@@ -534,6 +468,7 @@ exports.getTopProducts = async (req, res) => {
 
     const from = String(req.query.from || "").trim();
     const to = String(req.query.to || "").trim();
+
     if (!isValidYMD(from) || !isValidYMD(to)) {
       return res.status(400).json({
         ok: false,
@@ -552,7 +487,6 @@ exports.getTopProducts = async (req, res) => {
     const pipeline = [
       { $match: { status: "paid", order_date: { $gte: from, $lte: to } } },
       { $unwind: "$items" },
-
       ...(category
         ? [
             {
@@ -565,36 +499,32 @@ exports.getTopProducts = async (req, res) => {
             },
           ]
         : []),
-
       {
         $addFields: {
-          itemRevenue: {
-            $multiply: [
-              TO_NUM("$items.price", 0),
-              TO_NUM("$items.quantity", 0),
-            ],
-          },
+          // ✅ TO'G'RI HISOBLASH
+          itemRevenue: TO_NUM("$items.line_total", 0),
+          itemQty: TO_NUM("$items.quantity", 0),
         },
       },
-
       {
         $group: {
-          _id: { name: "$items.name", category_name: "$items.category_name" },
-          totalQty: { $sum: TO_NUM("$items.quantity", 0) },
+          _id: {
+            name: "$items.name",
+            category_name: "$items.category_name",
+          },
+          totalQty: { $sum: "$itemQty" },
           revenueTotal: { $sum: "$itemRevenue" },
         },
       },
-
       { $sort: { revenueTotal: -1 } },
       { $limit: limit },
-
       {
         $project: {
           _id: 0,
           name: "$_id.name",
           category_name: "$_id.category_name",
-          totalQty: 1,
-          revenueTotal: 1,
+          totalQty: { $round: ["$totalQty", 0] },
+          revenueTotal: { $round: ["$revenueTotal", 2] },
         },
       },
     ];
@@ -604,7 +534,12 @@ exports.getTopProducts = async (req, res) => {
     return res.json({
       ok: true,
       data,
-      meta: { from, to, limit, category: category || null },
+      meta: {
+        from,
+        to,
+        limit,
+        category: category || null,
+      },
     });
   } catch (err) {
     return res.status(500).json({
@@ -615,11 +550,14 @@ exports.getTopProducts = async (req, res) => {
   }
 };
 
+/* ============================================================
+   GET /reports/categories
+   ✅ KATEGORIYALAR RO'YXATI
+   ============================================================ */
 exports.getCategories = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
     const conn = getConn(branchKey);
-
     if (!conn) {
       return res.status(400).json({
         ok: false,

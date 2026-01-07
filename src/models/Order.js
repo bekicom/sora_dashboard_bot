@@ -68,7 +68,7 @@ const OrderSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-    collection: "globalorders", // ⚠️ agar collection nomi boshqacha bo‘lsa aytasan
+    collection: "global_orders", // ⚠️ agar collection nomi boshqacha bo‘lsa aytasan
   }
 );
 

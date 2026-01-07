@@ -1,51 +1,53 @@
 const mongoose = require("mongoose");
 
-const connections = {};
+let connection = null;
 
-function getMongoUri(branchKey) {
-  if (branchKey === "branch1") return process.env.MONGO_URI_BRANCH1;
-  if (branchKey === "branch2") return process.env.MONGO_URI_BRANCH2;
-  if (branchKey === "branch3") return process.env.MONGO_URI_BRANCH3;
-  return null;
+/**
+ * ✅ Faqat bitta Mongo URI
+ */
+function getMongoUri() {
+  return process.env.MONGO_URI_BRANCH1;
 }
 
-async function connectBranch(branchKey) {
-  const uri = getMongoUri(branchKey);
-  if (!uri) throw new Error(`Unknown branch key: ${branchKey}`);
+/**
+ * ✅ Asosiy connect
+ */
+async function connectMongo() {
+  const uri = getMongoUri();
+  if (!uri) throw new Error("MONGO_URI_BRANCH1 topilmadi");
 
-  if (connections[branchKey] && connections[branchKey].readyState === 1) {
-    return connections[branchKey];
+  if (connection && connection.readyState === 1) {
+    return connection;
   }
 
-  const conn = mongoose.createConnection(uri);
+  connection = mongoose.createConnection(uri);
 
   await new Promise((resolve, reject) => {
-    conn.once("connected", resolve);
-    conn.once("error", reject);
+    connection.once("connected", resolve);
+    connection.once("error", reject);
   });
 
-  connections[branchKey] = conn;
-  console.log(`✅ Mongo connected: ${branchKey}`);
-  return conn;
+  console.log("✅ Mongo connected (single branch)");
+  return connection;
 }
 
-async function initAllBranches() {
-  await Promise.all([
-    connectBranch("branch1"),
-    connectBranch("branch2"),
-    connectBranch("branch3"),
-  ]);
-}
-
+/**
+ * 🔁 Oldin ko‘p branch bo‘lgan joylar sinmasligi uchun qoldiramiz
+ */
 function getBranchKeyFromReq(req) {
-  // query: ?branch=branch1   (default branch1)
-  return String(req.query.branch || req.headers["x-branch"] || "branch1");
+  return "branch1";
 }
 
-function getConn(branchKey) {
-  const conn = connections[branchKey];
-  if (!conn || conn.readyState !== 1) return null;
-  return conn;
+/**
+ * ✅ Connection olish
+ */
+function getConn() {
+  if (!connection || connection.readyState !== 1) return null;
+  return connection;
 }
 
-module.exports = { initAllBranches, connectBranch, getBranchKeyFromReq, getConn };
+module.exports = {
+  connectMongo,
+  getBranchKeyFromReq,
+  getConn,
+};
