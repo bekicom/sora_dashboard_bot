@@ -30,16 +30,15 @@ exports.getSummary = async (req, res) => {
     const Order = getOrderModel(conn);
 
     const pipeline = [
-      {
-        $match: {
-          status: "paid",
-          order_date: { $gte: from, $lte: to },
-        },
-      },
+      { $match: { status: "paid", order_date: { $gte: from, $lte: to } } },
 
-      // 🔑 normalizatsiya + ofitsiant oyligi
       {
         $addFields: {
+          waiterNameLower: {
+            $toLower: { $trim: { input: { $ifNull: ["$waiter_name", ""] } } },
+          },
+
+          // mixedPaymentDetails yo'q bo'lsa ham bitta default payment
           paymentsUnified: {
             $cond: [
               {
@@ -58,27 +57,86 @@ exports.getSummary = async (req, res) => {
             ],
           },
 
-          waiterSalaryCalc: {
+          // servicePercent:
+          // - null/undefined bo'lsa => 10
+          // - 0 bo'lsa => 0 (Saboy kabi)
+          // - >0 bo'lsa o'sha
+          servicePercent: {
+            $cond: [
+              { $eq: ["$waiter_percentage", null] },
+              10,
+              { $ifNull: ["$waiter_percentage", 10] },
+            ],
+          },
+        },
+      },
+
+      // base/service/salary hisoblash
+      {
+        $addFields: {
+          finalTotalCalc: { $ifNull: ["$final_total", 0] },
+
+          // service_amount bo'lsa shuni ishlatamiz
+          serviceAmountCalc: {
             $cond: [
               { $gt: [{ $ifNull: ["$service_amount", 0] }, 0] },
-              "$service_amount",
+              { $ifNull: ["$service_amount", 0] },
+              // service_amount yo'q bo'lsa, percent orqali hisoblaymiz:
               {
-                $multiply: [
-                  { $ifNull: ["$final_total", 0] },
+                $cond: [
+                  { $gt: ["$servicePercent", 0] },
                   {
-                    $divide: [
+                    $subtract: [
+                      { $ifNull: ["$final_total", 0] },
                       {
-                        $cond: [
-                          { $gt: [{ $ifNull: ["$waiter_percentage", 0] }, 0] },
-                          "$waiter_percentage",
-                          10,
+                        $divide: [
+                          { $ifNull: ["$final_total", 0] },
+                          { $add: [1, { $divide: ["$servicePercent", 100] }] },
                         ],
                       },
-                      100,
                     ],
                   },
+                  0,
                 ],
               },
+            ],
+          },
+        },
+      },
+
+      {
+        $addFields: {
+          baseTotalCalc: {
+            $cond: [
+              { $gt: ["$serviceAmountCalc", 0] },
+              { $subtract: ["$finalTotalCalc", "$serviceAmountCalc"] },
+              // service bo'lmasa base=final
+              "$finalTotalCalc",
+            ],
+          },
+
+          // Oylik = base * 7%
+          salary7Calc: {
+            $cond: [
+              // saboy bo'lsa 0
+              { $eq: ["$waiterNameLower", "saboy"] },
+              0,
+              {
+                $cond: [
+                  { $gt: ["$servicePercent", 0] },
+                  { $multiply: ["$baseTotalCalc", 0.07] },
+                  0,
+                ],
+              },
+            ],
+          },
+
+          // Asosiy = serviceAmount (10%)
+          serviceTotalCalcFinal: {
+            $cond: [
+              { $eq: ["$waiterNameLower", "saboy"] },
+              0,
+              "$serviceAmountCalc",
             ],
           },
         },
@@ -91,9 +149,18 @@ exports.getSummary = async (req, res) => {
               $group: {
                 _id: null,
                 ordersCount: { $sum: 1 },
-                revenueTotal: { $sum: { $ifNull: ["$final_total", 0] } },
-                avgCheck: { $avg: { $ifNull: ["$final_total", 0] } },
-                waitersSalaryTotal: { $sum: "$waiterSalaryCalc" },
+
+                // ✅ tushum final (service bilan)
+                revenueTotal: { $sum: "$finalTotalCalc" },
+
+                avgCheck: { $avg: "$finalTotalCalc" },
+
+                // ✅ jami oylik (7%)
+                waitersSalaryTotal: { $sum: "$salary7Calc" },
+
+                // ixtiyoriy (agar ko'rsatmoqchi bo'lsang):
+                serviceTotal: { $sum: "$serviceTotalCalcFinal" },
+                baseTotal: { $sum: "$baseTotalCalc" },
               },
             },
             {
@@ -103,6 +170,8 @@ exports.getSummary = async (req, res) => {
                 revenueTotal: 1,
                 avgCheck: { $ifNull: ["$avgCheck", 0] },
                 waitersSalaryTotal: 1,
+                serviceTotal: 1,
+                baseTotal: 1,
               },
             },
           ],
@@ -112,13 +181,9 @@ exports.getSummary = async (req, res) => {
             {
               $group: {
                 _id: {
-                  $toLower: {
-                    $ifNull: ["$paymentsUnified.method", "unknown"],
-                  },
+                  $toLower: { $ifNull: ["$paymentsUnified.method", "unknown"] },
                 },
-                total: {
-                  $sum: { $ifNull: ["$paymentsUnified.amount", 0] },
-                },
+                total: { $sum: { $ifNull: ["$paymentsUnified.amount", 0] } },
               },
             },
             { $project: { _id: 0, method: "$_id", total: 1 } },
@@ -134,16 +199,18 @@ exports.getSummary = async (req, res) => {
       revenueTotal: 0,
       avgCheck: 0,
       waitersSalaryTotal: 0,
+      serviceTotal: 0,
+      baseTotal: 0,
     };
 
     const paymentsRaw = agg?.[0]?.payments || [];
-
     const payments = { cash: 0, card: 0, click: 0 };
+
     for (const p of paymentsRaw) {
       const m = String(p.method || "").toLowerCase();
-      if (m === "cash") payments.cash += p.total;
-      else if (m === "card") payments.card += p.total;
-      else if (m === "click") payments.click += p.total;
+      if (m === "cash") payments.cash += Number(p.total || 0);
+      else if (m === "card") payments.card += Number(p.total || 0);
+      else if (m === "click") payments.click += Number(p.total || 0);
     }
 
     return res.json({
@@ -164,58 +231,53 @@ exports.getSummary = async (req, res) => {
   }
 };
 
-
 exports.getWaitersReport = async (req, res) => {
   try {
     const branchKey = getBranchKeyFromReq(req);
     const conn = getConn(branchKey);
-
     if (!conn) {
-      return res.status(400).json({
-        ok: false,
-        message: `DB connection not ready for branch: ${branchKey}`,
-      });
+      return res.status(400).json({ ok: false, message: "DB yo‘q" });
     }
 
     const from = String(req.query.from || "").trim();
     const to = String(req.query.to || "").trim();
-
     if (!isValidYMD(from) || !isValidYMD(to)) {
-      return res.status(400).json({
-        ok: false,
-        message: "from/to format xato. Format: YYYY-MM-DD",
-      });
+      return res.status(400).json({ ok: false, message: "Sana xato" });
     }
 
-   const page = Number.isFinite(parseInt(req.query.page, 10))
-  ? parseInt(req.query.page, 10)
-  : 1;
-
-const limit = Number.isFinite(parseInt(req.query.limit, 10))
-  ? Math.min(Math.max(parseInt(req.query.limit, 10), 1), 100)
-  : 10;
-
-const skip = (page - 1) * limit;
-
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit || "20", 10), 1),
+      100,
+    );
+    const skip = (page - 1) * limit;
 
     const Order = getOrderModel(conn);
 
-    const match = {
-      status: "paid",
-      order_date: { $gte: from, $lte: to },
-    };
-
     const pipeline = [
-      { $match: match },
+      {
+        $match: {
+          status: "paid",
+          order_date: { $gte: from, $lte: to },
+        },
+      },
 
-      // salary calc (service_amount bo'lmasa 10%)
+      // 🔑 xizmat summasi (10% asos)
       {
         $addFields: {
-          waiterSalaryCalc: {
+          serviceBase: {
             $cond: [
-              { $gt: [{ $ifNull: ["$service_amount", 0] }, 0] },
-              "$service_amount",
-              { $multiply: [{ $ifNull: ["$final_total", 0] }, 0.1] },
+              { $eq: [{ $toLower: "$waiter_name" }, "saboy"] },
+              0,
+              {
+                $cond: [
+                  { $gt: [{ $ifNull: ["$service_amount", 0] }, 0] },
+                  "$service_amount",
+                  {
+                    $multiply: [{ $ifNull: ["$final_total", 0] }, 0.1],
+                  },
+                ],
+              },
             ],
           },
         },
@@ -223,10 +285,17 @@ const skip = (page - 1) * limit;
 
       {
         $group: {
-          _id: { $ifNull: ["$waiter_name", "Noma'lum"] },
+          _id: "$waiter_name",
           ordersCount: { $sum: 1 },
           revenueTotal: { $sum: { $ifNull: ["$final_total", 0] } },
-          salaryTotal: { $sum: "$waiterSalaryCalc" },
+
+          // ✅ 10%
+          serviceTotal: { $sum: "$serviceBase" },
+
+          // ✅ 7%
+          salary7Total: {
+            $sum: { $multiply: ["$serviceBase", 0.07] },
+          },
         },
       },
 
@@ -242,16 +311,17 @@ const skip = (page - 1) * limit;
 
     const agg = await Order.aggregate(pipeline);
 
-    const items = agg?.[0]?.items || [];
-    const total = agg?.[0]?.total?.[0]?.count || 0;
+    const items = agg[0]?.items || [];
+    const total = agg[0]?.total?.[0]?.count || 0;
 
     return res.json({
       ok: true,
       data: items.map((x) => ({
-        waiter_name: x._id,
-        ordersCount: x.ordersCount || 0,
-        revenueTotal: x.revenueTotal || 0,
-        salaryTotal: x.salaryTotal || 0,
+        waiter_name: x._id || "Noma’lum",
+        ordersCount: x.ordersCount,
+        revenueTotal: x.revenueTotal,
+        serviceTotal: Math.round(x.serviceTotal),
+        salary7Total: Math.round(x.salary7Total),
       })),
       meta: {
         page,
@@ -261,13 +331,10 @@ const skip = (page - 1) * limit;
       },
     });
   } catch (err) {
-    return res.status(500).json({
-      ok: false,
-      message: "Server error",
-      error: err.message,
-    });
+    return res.status(500).json({ ok: false, message: err.message });
   }
 };
+
 
 exports.getProductsReport = async (req, res) => {
   try {
@@ -294,7 +361,10 @@ exports.getProductsReport = async (req, res) => {
     const category = String(req.query.category || "").trim(); // ixtiyoriy: "bar", "somsa"...
 
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 100);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit || "10", 10), 1),
+      100,
+    );
     const skip = (page - 1) * limit;
 
     const Order = getOrderModel(conn);
@@ -310,7 +380,16 @@ exports.getProductsReport = async (req, res) => {
 
       // category filter (agar berilgan bo'lsa)
       ...(category
-        ? [{ $match: { "items.category_name": { $regex: `^${category}$`, $options: "i" } } }]
+        ? [
+            {
+              $match: {
+                "items.category_name": {
+                  $regex: `^${category}$`,
+                  $options: "i",
+                },
+              },
+            },
+          ]
         : []),
 
       {
@@ -409,7 +488,10 @@ exports.getTopProducts = async (req, res) => {
       });
     }
 
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 50);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit || "10", 10), 1),
+      50,
+    );
     const category = String(req.query.category || "").trim();
 
     const Order = getOrderModel(conn);
@@ -419,7 +501,16 @@ exports.getTopProducts = async (req, res) => {
       { $unwind: "$items" },
 
       ...(category
-        ? [{ $match: { "items.category_name": { $regex: `^${category}$`, $options: "i" } } }]
+        ? [
+            {
+              $match: {
+                "items.category_name": {
+                  $regex: `^${category}$`,
+                  $options: "i",
+                },
+              },
+            },
+          ]
         : []),
 
       {

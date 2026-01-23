@@ -426,6 +426,27 @@ bot.on("callback_query", async (q) => {
 
       const d = await apiSummary(st.branch, st.from, st.to);
 
+      // 🔑 ofitsiantlar 10% jami hisoblash
+      const waitersRes = await apiWaiters(st.branch, st.from, st.to, 1, 500);
+      const waiters = waitersRes?.data || [];
+
+      let waiters10Total = 0;
+
+      for (const w of waiters) {
+        const name = String(w.waiter_name || "").toLowerCase();
+        if (name === "saboy") continue;
+
+        const revenue = Number(w.revenueTotal || 0);
+        if (!revenue) continue;
+
+        const pure = revenue / 1.1;
+        const tenPercent = pure * 0.1;
+
+        waiters10Total += tenPercent;
+      }
+
+      waiters10Total = Math.round(waiters10Total);
+
       const text =
         `📊 Hisobot\n` +
         `🏢 Filial: ${branchLabel(st.branch)}\n` +
@@ -433,9 +454,7 @@ bot.on("callback_query", async (q) => {
         `🧾 Buyurtmalar: ${d.ordersCount}\n` +
         `💰 Tushum: ${formatMoney(d.revenueTotal)}\n` +
         `🧾 O‘rtacha chek: ${formatMoney(d.avgCheck)}\n` +
-        `👨‍🍳 Ofitsiantlar oyligi (jami): ${formatMoney(
-          d.waitersSalaryTotal,
-        )}\n\n` +
+        `👨‍🍳 Ofitsiantlarga ajratilgan (10%): ${formatMoney(waiters10Total)}\n\n` +
         `💵 Naqd: ${formatMoney(d.payments.cash)}\n` +
         `💳 Karta: ${formatMoney(d.payments.card)}\n` +
         `📲 Click: ${formatMoney(d.payments.click)}`;
@@ -443,52 +462,62 @@ bot.on("callback_query", async (q) => {
       return bot.sendMessage(chatId, text, mainMenu(chatId));
     }
 
-    // WAITERS
-    // WAITERS
-    if (data === "WAITERS") {
-      const st = getState(chatId);
-      await bot.answerCallbackQuery(q.id);
 
-      const res = await apiWaiters(st.branch, st.from, st.to, 1, 20);
-      const rows = res?.data || [];
+    
+ if (data === "WAITERS") {
+   const st = getState(chatId);
+   await bot.answerCallbackQuery(q.id);
 
-      if (!rows.length) {
-        return bot.sendMessage(
-          chatId,
-          "Bu sanada ofitsiantlar bo‘yicha data yo‘q.",
-          mainMenu(chatId),
-        );
-      }
+   const res = await apiWaiters(st.branch, st.from, st.to, 1, 50);
+   const rows = res?.data || [];
 
-      const text =
-        `👨‍🍳 Ofitsiantlar\n` +
-        `🏢 ${branchLabel(st.branch)}\n` +
-        `📅 ${formatRange(st)}\n\n` +
-        rows
-          .map((w, i) => {
-            const isSaboy =
-              String(w.waiter_name || "")
-                .trim()
-                .toLowerCase() === "saboy";
+   if (!rows.length) {
+     return bot.sendMessage(
+       chatId,
+       "Bu sanada ofitsiantlar bo‘yicha data yo‘q.",
+       mainMenu(chatId),
+     );
+   }
 
-            const revenue = Number(w.revenueTotal || 0);
+   const text =
+     `👨‍🍳 Ofitsiantlar\n` +
+     `🏢 ${branchLabel(st.branch)}\n` +
+     `📅 ${formatRange(st)}\n\n` +
+     rows
+       .map((w, i) => {
+         const name = String(w.waiter_name || "Noma'lum").trim();
+         const isSaboy = name.toLowerCase() === "saboy";
 
-            // 🔑 faqat Saboy uchun 0
-            const salary7 = isSaboy ? 0 : (revenue * 7) / 100;
-            const salary10 = isSaboy ? 0 : (revenue * 10) / 100;
+         const revenue = Number(w.revenueTotal || 0);
 
-            return (
-              `${i + 1}) ${w.waiter_name}\n` +
-              `   🧾 ${w.ordersCount} ta | 💰 ${formatMoney(revenue)}\n` +
-              `   👨‍🍳 7%: ${formatMoney(salary7)} | 👨‍🍳 10%: ${formatMoney(
-                salary10,
-              )}`
-            );
-          })
-          .join("\n");
+         let base10 = 0;
+         let salary7 = 0;
 
-      return bot.sendMessage(chatId, text, mainMenu(chatId));
-    }
+         if (!isSaboy && revenue > 0) {
+           // 🔑 1️⃣ sof xizmat summasi (10% ni chiqarib tashlaymiz)
+           const pureService = revenue / 1.1;
+
+           // 🔑 2️⃣ asosiy 10%
+           base10 = Math.round(pureService * 0.1);
+
+           // 🔑 3️⃣ oylik 7% (10% dan)
+           salary7 = Math.round(base10 * 0.7);
+         }
+
+         return (
+           `${i + 1}) ${name}\n` +
+           `🧾 ${w.ordersCount} ta | 💰 ${formatMoney(revenue)}\n` +
+           `👨‍🍳 Oylik:\n` +
+           ` • Asosiy (10%): ${formatMoney(base10)}\n` +
+           ` • Oylik (7%): ${formatMoney(salary7)}`
+         );
+       })
+       .join("\n\n");
+
+   return bot.sendMessage(chatId, text, mainMenu(chatId));
+ }
+
+
 
     // TOP PRODUCTS
     if (data === "TOP_PRODUCTS") {
