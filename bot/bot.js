@@ -342,7 +342,7 @@ bot.on("callback_query", async (q) => {
       await bot.answerCallbackQuery(q.id, { text: "Avval parol kiriting" });
       return bot.sendMessage(
         chatId,
-        "🔐 Avval parolni kiriting. /start bosing."
+        "🔐 Avval parolni kiriting. /start bosing.",
       );
     }
 
@@ -373,7 +373,7 @@ bot.on("callback_query", async (q) => {
       return bot.sendMessage(
         chatId,
         `✅ Filial o‘zgardi: ${branchLabel(branch)}`,
-        mainMenu(chatId)
+        mainMenu(chatId),
       );
     }
 
@@ -390,7 +390,7 @@ bot.on("callback_query", async (q) => {
         `✍️ Sana yuborish:\n` +
           `1) Bitta kun: 2025-09-26\n` +
           `2) Oraliq: 2025-09-01 2025-09-30 (ikki sana orasiga bo'sh joy)\n\n` +
-          `Format: YYYY-MM-DD`
+          `Format: YYYY-MM-DD`,
       );
     }
 
@@ -405,7 +405,7 @@ bot.on("callback_query", async (q) => {
         chatId,
         from,
         to,
-        type === "YEAR" ? "year" : type === "DAY" ? "day" : "range"
+        type === "YEAR" ? "year" : type === "DAY" ? "day" : "range",
       );
 
       await bot.answerCallbackQuery(q.id, {
@@ -414,10 +414,11 @@ bot.on("callback_query", async (q) => {
       return bot.sendMessage(
         chatId,
         `✅ Sana tanlandi: ${from === to ? from : `${from} → ${to}`}`,
-        mainMenu(chatId)
+        mainMenu(chatId),
       );
     }
 
+    // SUMMARY
     // SUMMARY
     if (data === "SUMMARY") {
       const st = getState(chatId);
@@ -425,19 +426,16 @@ bot.on("callback_query", async (q) => {
 
       const d = await apiSummary(st.branch, st.from, st.to);
 
-      // revenueTotal dan 7% va 10% hisoblaymiz
-      const salary7 = calcPercent(d?.revenueTotal, 7);
-      const salary10 = calcPercent(d?.revenueTotal, 10);
-
       const text =
         `📊 Hisobot\n` +
         `🏢 Filial: ${branchLabel(st.branch)}\n` +
         `📅 Sana: ${formatRange(st)}\n\n` +
         `🧾 Buyurtmalar: ${d.ordersCount}\n` +
         `💰 Tushum: ${formatMoney(d.revenueTotal)}\n` +
-        `🧾 O'rtacha chek: ${formatMoney(d.avgCheck)}\n` +
-        `👨‍🍳 Oylik (7%): ${formatMoney(salary7)}\n` +
-        `👨‍🍳 Oylik (10%): ${formatMoney(salary10)}\n\n` +
+        `🧾 O‘rtacha chek: ${formatMoney(d.avgCheck)}\n` +
+        `👨‍🍳 Ofitsiantlar oyligi (jami): ${formatMoney(
+          d.waitersSalaryTotal,
+        )}\n\n` +
         `💵 Naqd: ${formatMoney(d.payments.cash)}\n` +
         `💳 Karta: ${formatMoney(d.payments.card)}\n` +
         `📲 Click: ${formatMoney(d.payments.click)}`;
@@ -445,6 +443,7 @@ bot.on("callback_query", async (q) => {
       return bot.sendMessage(chatId, text, mainMenu(chatId));
     }
 
+    // WAITERS
     // WAITERS
     if (data === "WAITERS") {
       const st = getState(chatId);
@@ -457,7 +456,7 @@ bot.on("callback_query", async (q) => {
         return bot.sendMessage(
           chatId,
           "Bu sanada ofitsiantlar bo‘yicha data yo‘q.",
-          mainMenu(chatId)
+          mainMenu(chatId),
         );
       }
 
@@ -467,13 +466,23 @@ bot.on("callback_query", async (q) => {
         `📅 ${formatRange(st)}\n\n` +
         rows
           .map((w, i) => {
-            const rev = w.revenueTotal;
-            const s7 = calcPercent(rev, 7);
-            const s10 = calcPercent(rev, 10);
+            const isSaboy =
+              String(w.waiter_name || "")
+                .trim()
+                .toLowerCase() === "saboy";
+
+            const revenue = Number(w.revenueTotal || 0);
+
+            // 🔑 faqat Saboy uchun 0
+            const salary7 = isSaboy ? 0 : (revenue * 7) / 100;
+            const salary10 = isSaboy ? 0 : (revenue * 10) / 100;
+
             return (
               `${i + 1}) ${w.waiter_name}\n` +
-              `   🧾 ${w.ordersCount} ta | 💰 ${formatMoney(rev)}\n` +
-              `   👨‍🍳 7%: ${formatMoney(s7)} | 👨‍🍳 10%: ${formatMoney(s10)}`
+              `   🧾 ${w.ordersCount} ta | 💰 ${formatMoney(revenue)}\n` +
+              `   👨‍🍳 7%: ${formatMoney(salary7)} | 👨‍🍳 10%: ${formatMoney(
+                salary10,
+              )}`
             );
           })
           .join("\n");
@@ -491,7 +500,7 @@ bot.on("callback_query", async (q) => {
         st.from,
         st.to,
         10,
-        st.products.category
+        st.products.category,
       );
       const rows = res?.data || [];
 
@@ -499,7 +508,7 @@ bot.on("callback_query", async (q) => {
         return bot.sendMessage(
           chatId,
           "Bu sanada top taomlar data yo‘q.",
-          mainMenu(chatId)
+          mainMenu(chatId),
         );
       }
 
@@ -516,7 +525,7 @@ bot.on("callback_query", async (q) => {
           .map(
             (p, i) =>
               `${i + 1}) ${p.name} (${p.category_name || "-"})\n` +
-              `   📦 ${p.totalQty} | 💰 ${formatMoney(p.revenueTotal)}`
+              `   📦 ${p.totalQty} | 💰 ${formatMoney(p.revenueTotal)}`,
           )
           .join("\n");
 
@@ -529,7 +538,7 @@ bot.on("callback_query", async (q) => {
       return bot.sendMessage(
         chatId,
         "📦 Mahsulotlar menyusi:",
-        productsMenu(chatId)
+        productsMenu(chatId),
       );
     }
 
@@ -592,7 +601,7 @@ bot.on("callback_query", async (q) => {
       return bot.sendMessage(
         chatId,
         `✅ Category tanlandi: ${st.products.category || "Barchasi"}`,
-        productsMenu(chatId)
+        productsMenu(chatId),
       );
     }
 
@@ -610,7 +619,7 @@ bot.on("callback_query", async (q) => {
         st.to,
         page,
         limit,
-        st.products.category
+        st.products.category,
       );
       const items = res?.data || [];
       const meta = res?.meta || { page, pages: 1, total: items.length, limit };
@@ -619,7 +628,7 @@ bot.on("callback_query", async (q) => {
         return bot.sendMessage(
           chatId,
           "Bu sanada mahsulotlar bo‘yicha data yo‘q.",
-          productsMenu(chatId)
+          productsMenu(chatId),
         );
       }
 
@@ -638,8 +647,8 @@ bot.on("callback_query", async (q) => {
           (x, i) =>
             `${(page - 1) * limit + (i + 1)}) ${x.name}\n` +
             `   📦 ${x.totalQty} | 💵 ${formatMoney(
-              x.avgPrice
-            )} | 💰 ${formatMoney(x.revenueTotal)} | 🧾 ${x.ordersCount}`
+              x.avgPrice,
+            )} | 💰 ${formatMoney(x.revenueTotal)} | 🧾 ${x.ordersCount}`,
         )
         .join("\n");
 
@@ -656,7 +665,7 @@ bot.on("callback_query", async (q) => {
           reply_markup: { inline_keyboard: [] },
         })
         .then(() =>
-          bot.emit("callback_query", { ...q, data: "PRODUCTS_PAGE" })
+          bot.emit("callback_query", { ...q, data: "PRODUCTS_PAGE" }),
         );
     }
 
@@ -670,7 +679,7 @@ bot.on("callback_query", async (q) => {
           reply_markup: { inline_keyboard: [] },
         })
         .then(() =>
-          bot.emit("callback_query", { ...q, data: "PRODUCTS_PAGE" })
+          bot.emit("callback_query", { ...q, data: "PRODUCTS_PAGE" }),
         );
     }
 
@@ -685,7 +694,7 @@ bot.on("callback_query", async (q) => {
         st.to,
         1,
         10,
-        st.products.category
+        st.products.category,
       );
       const items = res?.data || [];
 
@@ -693,7 +702,7 @@ bot.on("callback_query", async (q) => {
         return bot.sendMessage(
           chatId,
           "Bu sanada mahsulotlar bo‘yicha data yo‘q.",
-          productsMenu(chatId)
+          productsMenu(chatId),
         );
       }
 
@@ -711,8 +720,8 @@ bot.on("callback_query", async (q) => {
             (x, i) =>
               `${i + 1}) ${x.name}\n` +
               `   📦 ${x.totalQty} | 💵 ${formatMoney(
-                x.avgPrice
-              )} | 💰 ${formatMoney(x.revenueTotal)} | 🧾 ${x.ordersCount}`
+                x.avgPrice,
+              )} | 💰 ${formatMoney(x.revenueTotal)} | 🧾 ${x.ordersCount}`,
           )
           .join("\n");
 

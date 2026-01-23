@@ -23,55 +23,41 @@ exports.getSummary = async (req, res) => {
     if (!isValidYMD(from) || !isValidYMD(to)) {
       return res.status(400).json({
         ok: false,
-        message:
-          "from/to format xato. Format: YYYY-MM-DD. Misol: from=2025-12-21&to=2025-12-21",
+        message: "from/to format xato. Format: YYYY-MM-DD",
       });
     }
 
     const Order = getOrderModel(conn);
 
-    const match = {
-      status: "paid",
-      order_date: { $gte: from, $lte: to },
-    };
-
     const pipeline = [
-      { $match: match },
+      {
+        $match: {
+          status: "paid",
+          order_date: { $gte: from, $lte: to },
+        },
+      },
 
-      // normalize + calc
+      // 🔑 normalizatsiya + ofitsiant oyligi
       {
         $addFields: {
-          // mixedPaymentDetails null bo'lsa ham [] bo'ladi
-      paymentsUnified: {
-  $cond: [
-    {
-      $and: [
-        { $isArray: "$mixedPaymentDetails" },
-        { $gt: [{ $size: "$mixedPaymentDetails" }, 0] },
-      ],
-    },
-    "$mixedPaymentDetails",
-    [
-      {
-        method: { $ifNull: ["$paymentMethod", "unknown"] },
-        amount: { $ifNull: ["$paymentAmount", 0] },
-      },
-    ],
-  ],
-},
-
-
-          // defaultPercent: waiter_percentage > 0 bo'lsa o'sha, bo'lmasa 10
-          waiterPercentEffective: {
+          paymentsUnified: {
             $cond: [
-              { $gt: [{ $ifNull: ["$waiter_percentage", 0] }, 0] },
-              "$waiter_percentage",
-              10,
+              {
+                $and: [
+                  { $isArray: "$mixedPaymentDetails" },
+                  { $gt: [{ $size: "$mixedPaymentDetails" }, 0] },
+                ],
+              },
+              "$mixedPaymentDetails",
+              [
+                {
+                  method: { $ifNull: ["$paymentMethod", "unknown"] },
+                  amount: { $ifNull: ["$paymentAmount", 0] },
+                },
+              ],
             ],
           },
 
-          // salary: service_amount > 0 bo'lsa service_amount
-          // aks holda final_total * percent
           waiterSalaryCalc: {
             $cond: [
               { $gt: [{ $ifNull: ["$service_amount", 0] }, 0] },
@@ -125,8 +111,14 @@ exports.getSummary = async (req, res) => {
             { $unwind: "$paymentsUnified" },
             {
               $group: {
-                _id: { $toLower: { $ifNull: ["$paymentsUnified.method", "unknown"] } },
-                total: { $sum: { $ifNull: ["$paymentsUnified.amount", 0] } },
+                _id: {
+                  $toLower: {
+                    $ifNull: ["$paymentsUnified.method", "unknown"],
+                  },
+                },
+                total: {
+                  $sum: { $ifNull: ["$paymentsUnified.amount", 0] },
+                },
               },
             },
             { $project: { _id: 0, method: "$_id", total: 1 } },
@@ -137,34 +129,28 @@ exports.getSummary = async (req, res) => {
 
     const agg = await Order.aggregate(pipeline);
 
-    const summary =
-      (agg && agg[0] && agg[0].summary && agg[0].summary[0]) || {
-        ordersCount: 0,
-        revenueTotal: 0,
-        avgCheck: 0,
-        waitersSalaryTotal: 0,
-      };
+    const summary = agg?.[0]?.summary?.[0] || {
+      ordersCount: 0,
+      revenueTotal: 0,
+      avgCheck: 0,
+      waitersSalaryTotal: 0,
+    };
 
-    const paymentsArr = (agg && agg[0] && agg[0].payments) || [];
+    const paymentsRaw = agg?.[0]?.payments || [];
 
-    // faqat kerakli 3 ta methodni ko'rsatamiz
     const payments = { cash: 0, card: 0, click: 0 };
-
-    for (const p of paymentsArr) {
-      const method = String(p.method || "").toLowerCase();
-      const total = Number(p.total || 0);
-
-      if (method === "cash") payments.cash += total;
-      else if (method === "card") payments.card += total;
-      else if (method === "click") payments.click += total;
-      // boshqa methodlar bo'lsa hozircha e'tiborsiz qoldiramiz
+    for (const p of paymentsRaw) {
+      const m = String(p.method || "").toLowerCase();
+      if (m === "cash") payments.cash += p.total;
+      else if (m === "card") payments.card += p.total;
+      else if (m === "click") payments.click += p.total;
     }
 
     return res.json({
       ok: true,
       data: {
-        range: { from, to },
         branch: branchKey,
+        range: { from, to },
         ...summary,
         payments,
       },
@@ -177,6 +163,7 @@ exports.getSummary = async (req, res) => {
     });
   }
 };
+
 
 exports.getWaitersReport = async (req, res) => {
   try {
