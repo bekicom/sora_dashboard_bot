@@ -4,10 +4,32 @@ const axios = require("axios");
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
+function normalizeApiBaseUrl(rawUrl) {
+  const fallback = "http://127.0.0.1:8072/api";
+  const value = String(rawUrl || fallback).trim();
+
+  try {
+    const parsed = new URL(value);
+
+    // Avoid IPv6 loopback issues when localhost resolves to ::1.
+    if (parsed.hostname === "localhost") {
+      parsed.hostname = "127.0.0.1";
+    }
+
+    return parsed.toString().replace(/\/$/, "");
+  } catch (_) {
+    return fallback;
+  }
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(process.env.API_BASE_URL);
+
 const API = axios.create({
-  baseURL: process.env.API_BASE_URL || "http://localhost:8072/api",
+  baseURL: API_BASE_URL,
   timeout: 20000,
 });
+
+console.log(`🌐 API base URL: ${API_BASE_URL}`);
 
 // =====================
 // AUTH (PASSWORD GATE)
@@ -767,6 +789,11 @@ bot.on("callback_query", async (q) => {
       "❌ Xatolik yuz berdi.\n" +
       (err.response?.data?.message
         ? `message: ${err.response.data.message}\n`
+        : "") +
+      ((err.code === "ECONNREFUSED" ||
+        String(err.message || "").includes("ECONNREFUSED"))
+        ? `API: ${API_BASE_URL}\n` +
+          "sabab: backend porti ochilmagan yoki noto‘g‘ri sozlangan\n"
         : "") +
       (err.message ? `error: ${err.message}` : "");
 
